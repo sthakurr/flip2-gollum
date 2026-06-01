@@ -125,6 +125,61 @@ class GP(SurrogateModel, SingleTaskGP):
         )
 
 
+class SparseArdGP(GP):
+    """GP with a sparse axis-aligned (ARD) Matérn kernel, sized to the input
+    dimension at construction time. Intended for the ESM-C SAE arm: a
+    sparsity-promoting Gamma lengthscale prior pushes most per-dimension
+    lengthscales large (irrelevant features) so the few biologically meaningful
+    SAE features dominate — the SAASBO idea, but using MAP fitting via
+    ``fit_gpytorch_mll`` so it keeps the standard posterior interface that the
+    acquisition functions and ranking metrics expect.
+    """
+
+    def __init__(
+        self,
+        train_x: Union[np.ndarray, torch.Tensor] = None,
+        train_y: Union[np.ndarray, torch.Tensor] = None,
+        likelihood: Union[GaussianLikelihood, None] = None,
+        mean_module: Union[Mean, None] = None,
+        standardize: bool = True,
+        normalize: bool = False,
+        initial_noise_val: float = 1e-4,
+        noise_constraint: float = 1e-5,
+        initial_outputscale_val: float = 1.0,
+        initial_lengthscale_val: float = 1.0,
+        gp_lr: float = 0.2,
+        nu: float = 2.5,
+        lengthscale_prior_concentration: float = 3.0,
+        lengthscale_prior_rate: float = 6.0,
+    ) -> None:
+        from gpytorch.kernels import ScaleKernel, MaternKernel
+        from gpytorch.priors import GammaPrior
+
+        ard_num_dims = train_x.shape[-1]
+        base_kernel = MaternKernel(
+            nu=nu,
+            ard_num_dims=ard_num_dims,
+            lengthscale_prior=GammaPrior(
+                lengthscale_prior_concentration, lengthscale_prior_rate
+            ),
+        )
+        covar_module = ScaleKernel(base_kernel)
+        super().__init__(
+            train_x=train_x,
+            train_y=train_y,
+            likelihood=likelihood,
+            covar_module=covar_module,
+            mean_module=mean_module,
+            standardize=standardize,
+            normalize=normalize,
+            initial_noise_val=initial_noise_val,
+            noise_constraint=noise_constraint,
+            initial_outputscale_val=initial_outputscale_val,
+            initial_lengthscale_val=initial_lengthscale_val,
+            gp_lr=gp_lr,
+        )
+
+
 class DeepGP(SurrogateModel, SingleTaskGP):
     def __init__(
         self,

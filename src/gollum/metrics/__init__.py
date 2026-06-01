@@ -5,6 +5,14 @@ from .model_metrics import (
     log_model_parameters,
     calculate_weighted_metrics,
 )
+from .ranking import (
+    spearman,
+    kendall,
+    top_k_recovery,
+    precision_at_k,
+    calculate_ranking_metrics,
+    log_surrogate_eval,
+)
 
 all = [
     "calculate_data_stats",
@@ -14,4 +22,10 @@ all = [
     "log_model_fit_metrics",
     "log_model_parameters",
     "calculate_weighted_metrics",
+    "spearman",
+    "kendall",
+    "top_k_recovery",
+    "precision_at_k",
+    "calculate_ranking_metrics",
+    "log_surrogate_eval",
 ]

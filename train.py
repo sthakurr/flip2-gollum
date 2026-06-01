@@ -49,6 +49,7 @@ from gollum.metrics import (
     calculate_data_stats,
     log_bo_metrics,
     log_data_stats,
+    log_surrogate_eval,
 )
 
 
@@ -209,16 +210,136 @@ def setup_bo_optimizer(config, design_space):
     return bo
 
 
+def run_gate(config, dm, bo):
+    """Surrogate-quality gate: fit the surrogate on the current train set (the
+    Phase-1-collected points) and evaluate how well it ranks the held-aside test
+    split. Answers "does this representation transfer train->test?". When run
+    after run_bo (mode=both) the train set is the full 96 + n_iters*batch points.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if dm.test_x is None:
+        raise ValueError(
+            "Gate mode needs a held-aside test set; set respect_split: true."
+        )
+    train_x = dm.train_x.clone().to(device)
+    train_y = dm.train_y.clone().to(device)
+    test_x = dm.test_x.clone().to(device)
+    test_y = dm.test_y.clone().to(device)
+
+    print(f"Gate: fitting on {train_x.shape[0]} train points, "
+          f"evaluating on {test_x.shape[0]} test points")
+    bo.train_surrogate_model(train_x, train_y)
+    posterior = bo.surrogate_model.predict(test_x, return_posterior=True)
+    metrics = log_surrogate_eval(
+        posterior, test_y, stage="test", epoch=config.get("n_iters", 0)
+    )
+    print("Gate metrics (train->test):")
+    for k, v in metrics.items():
+        print(f"  {k}: {v:.4f}")
+    return metrics
+
+
+def run_bo(config, dm, bo, data_stats):
+    """Phase-2 BO loop: iteratively acquire candidates from the held-out design
+    space (the test split when respect_split is set)."""
+    for i in tqdm(range(config["n_iters"]), colour="blue"):
+        train_x = dm.train_x.clone().to("cuda")
+        train_y = dm.train_y.clone().to("cuda")
+        design_space = dm.heldout_x.clone().to("cuda")
+
+        ## this trains the model, updates acqf and returns the next point to evaluate
+        x_next = bo.suggest_next_experiments(train_x, train_y, design_space)
+        x_next = torch.stack(x_next)
+
+        log_bo_metrics(data_stats, dm.train_y, epoch=i)
+
+        matches = (design_space.unsqueeze(0).to("cuda") == x_next).all(dim=-1)
+        indices = matches.nonzero(as_tuple=True)[1].to("cpu")
+
+        if not torch.all(matches.sum(dim=-1) == 1):
+            print("Unable to find a unique match for some x_next in the dataset.")
+
+        wandb.log(
+            {
+                "evaluated_suggestions": wandb.Histogram(dm.heldout_y[indices]),
+                "epoch": i,
+            }
+        )
+
+        x_next = x_next.squeeze(1)
+
+        # update indices tracking
+        evaluated_original_indices = dm.heldout_indices[indices]
+        dm.train_indexes = np.append(dm.train_indexes, evaluated_original_indices)
+        dm.heldout_indices = np.delete(dm.heldout_indices, indices)
+
+        dm.train_x = dm.x[dm.train_indexes]
+        dm.train_y = dm.y[dm.train_indexes]
+        dm.heldout_x = dm.x[dm.heldout_indices]
+        dm.heldout_y = dm.y[dm.heldout_indices]
+
+        train_df = dm.data.loc[dm.train_indexes].copy()
+        heldout_df = dm.data.loc[dm.heldout_indices.tolist()].copy()
+        dm.data = pd.concat([train_df, heldout_df])
+
+        df_values = dm.data.loc[dm.train_indexes][dm.target_column].values
+        tensor_values = dm.train_y.squeeze().cpu().numpy()
+
+        is_consistent = np.allclose(df_values, tensor_values)
+        assert is_consistent, "DataFrame values don't match tensor values"
+
+        assert len(np.unique(dm.train_indexes)) == len(
+            dm.train_indexes
+        ), "Duplicates found in dm.train_indexes"
+        assert len(np.unique(dm.heldout_indices)) == len(
+            dm.heldout_indices
+        ), "Duplicates found in dm.heldout_indices"
+
+        # Check for any common indices between dm.train_indexes and dm.heldout_indices
+        common_indices = np.intersect1d(dm.train_indexes, dm.heldout_indices)
+        assert (
+            len(common_indices) == 0
+        ), f"Common indices found between train and heldout: {common_indices}"
+        # In respect_split mode the test rows are held aside (not in train/heldout).
+        n_test = 0 if getattr(dm, "test_indices", None) is None else len(dm.test_indices)
+        total_indices = len(dm.train_indexes) + len(dm.heldout_indices) + n_test
+        assert total_indices == len(dm.x), "Mismatch in the total number of indices"
+
+    log_bo_metrics(data_stats, dm.train_y, epoch=config["n_iters"])
+
+
+def make_run_name(config, mode):
+    """Build a meaningful W&B run name. Uses an explicit ``name`` from the config
+    if present (the representation arms set this), otherwise derives one from the
+    featurizer representation / model / PCA so different arms don't collide."""
+    base = config.get("name")
+    if not base:
+        feat = config["data"]["init_args"]["featurizer"]["init_args"]
+        rep = feat.get("representation", "feat")
+        model_name = feat.get("model_name")
+        if rep in ("get_huggingface_embeddings", "get_esmc_embeddings"):
+            base = (model_name or rep).split("/")[-1]
+        elif rep == "get_esmc_sae_features":
+            base = f"{(model_name or 'esmc').split('/')[-1]}_sae"
+        elif rep == "onehot":
+            base = "onehot"
+        else:
+            base = rep
+        reduce_dim = config["data"]["init_args"].get("reduce_dim")
+        if reduce_dim:
+            base += f"_pca{reduce_dim}"
+    return f"{base}_{mode}_seed{config['seed']}"
+
+
 def train(config):
     if config.get("benchmark", None) is not None:
         config = configure_benchmark_datasets(config)
-    
+
     config = validate_configuration(config)
     wandb_config = flatten(config)
-    
-    model_name = config["data"]["init_args"]["featurizer"]["init_args"]["model_name"]
-    model_short = model_name.split("/")[-1]
-    run_name = f"{model_short}_seed{config['seed']}"
+
+    mode = config.get("mode", "bo") or "bo"
+    run_name = make_run_name(config, mode)
 
     with wandb.init(
         project="gollum", config=wandb_config, group=config["group"], name=run_name
@@ -226,74 +347,16 @@ def train(config):
 
         dm = setup_data(config)
         bo = setup_bo_optimizer(config, design_space=dm.heldout_x)
-        
+
         data_stats = calculate_data_stats(dm.x, dm.y)
         log_data_stats(data_stats)
 
-        # Start the training loop
-        for i in tqdm(range(config["n_iters"]), colour="blue"):
-            train_x = dm.train_x.clone().to("cuda")
-            train_y = dm.train_y.clone().to("cuda")
-            design_space = dm.heldout_x.clone().to("cuda")
-
-            ## this trains the model, updates acqf and returns the next point to evaluate
-            x_next = bo.suggest_next_experiments(train_x, train_y, design_space)
-            x_next = torch.stack(x_next)
-
-            log_bo_metrics(data_stats, dm.train_y, epoch=i)
-           
-
-            matches = (design_space.unsqueeze(0).to("cuda") == x_next).all(dim=-1)
-            indices = matches.nonzero(as_tuple=True)[1].to("cpu")
-
-            if not torch.all(matches.sum(dim=-1) == 1):
-                print("Unable to find a unique match for some x_next in the dataset.")
-
-            wandb.log(
-                {
-                    "evaluated_suggestions": wandb.Histogram(dm.heldout_y[indices]),
-                    "epoch": i,
-                }
-            )
-
-            x_next = x_next.squeeze(1)
-
-            # update indices tracking
-            evaluated_original_indices = dm.heldout_indices[indices]
-            dm.train_indexes = np.append(dm.train_indexes, evaluated_original_indices)
-            dm.heldout_indices = np.delete(dm.heldout_indices, indices)
-
-            dm.train_x = dm.x[dm.train_indexes]
-            dm.train_y = dm.y[dm.train_indexes]
-            dm.heldout_x = dm.x[dm.heldout_indices]
-            dm.heldout_y = dm.y[dm.heldout_indices]
-
-            train_df = dm.data.loc[dm.train_indexes].copy()
-            heldout_df = dm.data.loc[dm.heldout_indices.tolist()].copy()
-            dm.data = pd.concat([train_df, heldout_df])
-
-            df_values = dm.data.loc[dm.train_indexes][dm.target_column].values
-            tensor_values = dm.train_y.squeeze().cpu().numpy()
-
-            is_consistent = np.allclose(df_values, tensor_values)
-            assert is_consistent, "DataFrame values don't match tensor values"
-
-            assert len(np.unique(dm.train_indexes)) == len(
-                dm.train_indexes
-            ), "Duplicates found in dm.train_indexes"
-            assert len(np.unique(dm.heldout_indices)) == len(
-                dm.heldout_indices
-            ), "Duplicates found in dm.heldout_indices"
-
-            # Check for any common indices between dm.train_indexes and dm.heldout_indices
-            common_indices = np.intersect1d(dm.train_indexes, dm.heldout_indices)
-            assert (
-                len(common_indices) == 0
-            ), f"Common indices found between train and heldout: {common_indices}"
-            total_indices = len(dm.train_indexes) + len(dm.heldout_indices)
-            assert total_indices == len(dm.x), "Mismatch in the total number of indices"
-
-        log_bo_metrics(data_stats, dm.train_y, epoch=config["n_iters"])
+        # For `both`: run Phase-1 BO collection over the train pool first, then
+        # evaluate the resulting GP on the held-aside test split.
+        if mode in ("bo", "both"):
+            run_bo(config, dm, bo, data_stats)
+        if mode in ("gate", "both"):
+            run_gate(config, dm, bo)
 
         # Save finetuned model if using DeepGP
         if config["surrogate_model"]["class_path"] == "gollum.surrogate_models.gp.DeepGP":
@@ -339,15 +402,21 @@ def main():
     # Initialize the parser with a description
     parser = ArgumentParser(
         description="Training script",
-        default_config_files=["configs/bochemian.yaml"],
+        default_config_files=["configs/flip2_arms/esm2_pca.yaml"],
     )
     parser.add_argument("--config", action=ActionConfigFile)
     parser.add_argument("--seed", type=int, help="Random seeds to use")
     parser.add_argument("--benchmark", type=str, help="Run a specific benchmark")
 
     parser.add_argument("--n_iters", type=int, help="How many iterations to run")
-   
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="bo",
+        help="gate (fit on train, rank test), bo (Phase-2 loop), or both",
+    )
     parser.add_argument("--group", type=str, help="Wandb group runs")
+    parser.add_argument("--name", type=str, default=None, help="Wandb run name base")
     parser.add_argument("--visualize", type=bool, default=False, help="Visualize embeddings after training")
     parser.add_argument("--full_data_path", type=str, default=None, help="Path to full dataset with split labels (for visualization)")
 

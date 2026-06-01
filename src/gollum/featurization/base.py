@@ -19,15 +19,17 @@ class Featurizer:
         model_name: Optional[str] = None,
         pooling_method: Optional[str] = None,
         normalize_embeddings: bool = False,
+        sae_weights_path: Optional[str] = None,
     ):
         self.representation = representation
-        
+
         self.params = {
             "bond_radius": bond_radius,
             "nBits": nBits,
             "model_name": model_name,
             "pooling_method": pooling_method,
             "normalize_embeddings": normalize_embeddings,
+            "sae_weights_path": sae_weights_path,
         }
         self._featurization_registry = self._build_registry()
         self._output_dim = None
@@ -38,10 +40,17 @@ class Featurizer:
         This centralizes the import logic and makes it easier to add new methods.
         """
         from gollum.featurization.molecular import fingerprints, fragments, mqn_features, chemberta_features
-        from gollum.featurization.text import get_tokens, get_huggingface_embeddings, instructor_embeddings
+        from gollum.featurization.text import (
+            get_tokens,
+            get_huggingface_embeddings,
+            instructor_embeddings,
+            get_esmc_embeddings,
+            get_esmc_sae_features,
+        )
         # from gollum.featurization.reaction import rxnfp, drfp, one_hot
         from gollum.featurization.general import precalculated, all_continuous
-        
+        from gollum.featurization.protein import one_hot_matrix
+
         return {
             "fingerprints": fingerprints,
             "fragments": fragments,
@@ -52,6 +61,9 @@ class Featurizer:
             "instructor_embeddings": instructor_embeddings,
             "precalculated": precalculated,
             "all_continuous": all_continuous,
+            "onehot": one_hot_matrix,
+            "get_esmc_embeddings": get_esmc_embeddings,
+            "get_esmc_sae_features": get_esmc_sae_features,
         }
     
     @property

@@ -1,0 +1,50 @@
+# Representation-comparison arm: one-hot encoding baseline.
+# Phase-1 sample drawn from the train split; design space = test split.
+data:
+  class_path: gollum.data.module.BaseDataModule
+  init_args:
+    data_path: data/flip2/alpha-amylase/one_to_many.csv
+    input_column: sequence
+    target_column: target
+    maximize: true
+    exclude_top: true
+    respect_split: true          # honor the FLIP train/test `set` column
+    split_column: set
+    normalize_input: standard_scaling_per_dim
+    featurizer:
+      class_path: gollum.data.module.Featurizer
+      init_args:
+        representation: onehot     # flatten one-hot, drop zero-variance columns
+        model_name: onehot         # label only (ignored by the featurizer)
+    initializer:
+      class_path: gollum.initialization.initializers.BOInitializer
+      init_args:
+        method: true_random
+        n_clusters: 288            # Phase-1 budget (~3 x 96)
+bo:
+  class_path: gollum.bo.optimizer.BotorchOptimizer
+  init_args:
+    batch_strategy: "kriging"
+    batch_size: 96
+acquisition:
+  class_path: botorch.acquisition.analytic.ExpectedImprovement
+  init_args:
+    maximize: True
+surrogate_model:
+  class_path: gollum.surrogate_models.gp.GP
+  init_args:
+    likelihood: null
+    covar_module: null            # BoTorch default (dimension-scaled prior)
+    mean_module:
+      class_path: gpytorch.means.ConstantMean
+    standardize: true
+    normalize: false
+    initial_noise_val: 1.0
+    noise_constraint: 1.0e-04
+    initial_outputscale_val: 1.0
+    initial_lengthscale_val: 3.0
+name: onehot                       # W&B run name base
+mode: gate                         # gate | bo | both (override with --mode)
+n_iters: 3                         # Phase-2 BO iterations (used in bo/both)
+seed: 0
+group: flip2_rep_comparison

@@ -282,6 +282,139 @@ def instructor_embeddings(
     return np.concatenate(sentence_embeddings_list, axis=0)
 
 
+# ---------------------------------------------------------------------------
+# ESM-C (EvolutionaryScale ESM Cambrian) embeddings + sparse-autoencoder feats
+# ---------------------------------------------------------------------------
+
+EMBEDDING_CACHE_DIR = os.environ.get("GOLLUM_EMBEDDING_CACHE", "embeddings_cache")
+
+
+def _cache_path(tag, texts):
+    """Deterministic cache file for a (tag, sequence-set) pair."""
+    import hashlib
+
+    h = hashlib.md5(("\n".join(texts)).encode()).hexdigest()[:16]
+    os.makedirs(EMBEDDING_CACHE_DIR, exist_ok=True)
+    safe_tag = tag.replace("/", "_")
+    return os.path.join(EMBEDDING_CACHE_DIR, f"{safe_tag}_{h}.npy")
+
+
+def get_esmc_embeddings(
+    texts,
+    model_name="esmc_300m",
+    pooling_method="average",
+    batch_size=8,
+    device="cuda" if torch.cuda.is_available() else "cpu",
+    normalize_embeddings=False,
+):
+    """Mean-pooled ESM-C (ESM Cambrian) per-sequence embeddings.
+
+    Uses the EvolutionaryScale ``esm`` SDK. Results are cached to disk keyed by
+    the model name + sequence set, since ESM-C is expensive. Raises a clear
+    ImportError if the ``esm`` package is not installed (so the sweep can skip
+    the ESM-C arms rather than crash cryptically).
+    """
+    texts = list(texts)
+    cache = _cache_path(f"esmc_{model_name}_{pooling_method}", texts)
+    if os.path.exists(cache):
+        print(f"loading cached ESM-C embeddings from {cache}")
+        return np.load(cache)
+
+    try:
+        from esm.models.esmc import ESMC
+        from esm.sdk.api import ESMProtein, LogitsConfig
+    except ImportError as e:
+        raise ImportError(
+            "ESM-C embeddings require the EvolutionaryScale `esm` package "
+            "(`pip install esm`). Install it or drop the esmc_* arms from the "
+            f"sweep. Original error: {e}"
+        )
+
+    print(f"featurizing with ESM-C ({model_name})")
+    client = ESMC.from_pretrained(model_name).to(device)
+    client.eval()
+
+    embeddings = []
+    for seq in tqdm(texts, desc=f"Processing with {model_name}"):
+        protein = ESMProtein(sequence=seq)
+        with torch.no_grad():
+            tensor = client.encode(protein)
+            out = client.logits(
+                tensor, LogitsConfig(sequence=True, return_embeddings=True)
+            )
+            # out.embeddings: (1, L+special_tokens, d); drop BOS/EOS, mean-pool.
+            residues = out.embeddings[0, 1:-1, :]
+            if pooling_method == "average":
+                pooled = residues.mean(dim=0)
+            elif pooling_method == "cls":
+                pooled = out.embeddings[0, 0, :]
+            else:
+                raise ValueError(f"Unsupported pooling_method: {pooling_method}")
+            if normalize_embeddings:
+                pooled = F.normalize(pooled, p=2, dim=-1)
+            embeddings.append(pooled.cpu().numpy())
+        torch.cuda.empty_cache()
+
+    arr = np.stack(embeddings, axis=0)
+    np.save(cache, arr)
+    return arr
+
+
+def get_esmc_sae_features(
+    texts,
+    model_name="esmc_300m",
+    pooling_method="average",
+    sae_weights_path=None,
+    device="cuda" if torch.cuda.is_available() else "cpu",
+):
+    """Sparse-autoencoder features over ESM-C embeddings (InterPLM-style).
+
+    Loads a trained SAE (a state dict containing encoder weights/bias) from
+    ``sae_weights_path``, encodes the (mean-pooled) ESM-C embeddings into the
+    sparse feature space, and prunes features that are never active or constant
+    across the dataset (keeping only active & variable features, as planned).
+
+    Raises a clear error if no weights path is provided / loadable so the SAE
+    arm is skipped rather than crashing the sweep.
+    """
+    if sae_weights_path is None or not os.path.exists(str(sae_weights_path)):
+        raise FileNotFoundError(
+            "ESM-C SAE features require `sae_weights_path` pointing to trained "
+            "SAE weights (e.g. InterPLM-style). None provided / file missing: "
+            f"{sae_weights_path}. Provide weights or drop the esmc_sae arm."
+        )
+
+    embeddings = get_esmc_embeddings(
+        texts, model_name=model_name, pooling_method=pooling_method, device=device
+    )
+    x = torch.from_numpy(embeddings).float().to(device)
+
+    state = torch.load(sae_weights_path, map_location=device)
+    # Support either a raw state_dict or a checkpoint wrapping one.
+    if isinstance(state, dict) and "state_dict" in state:
+        state = state["state_dict"]
+    # Find the encoder weight/bias by common naming conventions.
+    w_key = next((k for k in state if k.endswith("encoder.weight") or k == "W_enc"), None)
+    b_key = next((k for k in state if k.endswith("encoder.bias") or k == "b_enc"), None)
+    if w_key is None:
+        raise KeyError(
+            f"Could not find an encoder weight in SAE checkpoint keys: {list(state)}"
+        )
+    W = state[w_key].to(device).float()
+    # Linear weight is stored (out, in); W_enc-style is (in, hidden).
+    pre = x @ W.T if W.shape[1] == x.shape[1] else x @ W
+    if b_key is not None:
+        pre = pre + state[b_key].to(device).float()
+    feats = F.relu(pre).cpu().numpy()
+
+    # Keep only features that are active (non-zero somewhere) and variable.
+    keep = feats.std(axis=0) > 0
+    n_dropped = int((~keep).sum())
+    if n_dropped:
+        print(f"SAE: dropping {n_dropped} inactive/constant features, keeping {int(keep.sum())}")
+    return feats[:, keep].astype(np.float32)
+
+
 
 
 
