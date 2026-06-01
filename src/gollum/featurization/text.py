@@ -174,15 +174,34 @@ def get_huggingface_embeddings(
     texts,
     model_name="tiiuae/falcon-7b",
     max_length=512,
-    batch_size=8,
+    batch_size=16,
     pooling_method="cls",
     prefix=None,
     device="cuda" if torch.cuda.is_available() else "cpu",
     normalize_embeddings=False,
+    use_cache=True,
 ):
     """
     General function to get embeddings from a HuggingFace transformer model.
+
+    Embeddings depend only on (sequences, model, pooling, prefix, max_length,
+    normalize) — not on the BO seed — so they are cached to disk and reused
+    across seeds/modes/re-runs. Inference uses bf16 autocast on CUDA for speed.
     """
+    texts = list(texts)
+    cache = (
+        _cache_path(
+            f"hf_{model_name}_{pooling_method}_L{max_length}"
+            f"_norm{int(normalize_embeddings)}_pre{prefix}",
+            texts,
+        )
+        if use_cache
+        else None
+    )
+    if cache and os.path.exists(cache):
+        print(f"loading cached embeddings from {cache}")
+        return np.load(cache)
+
     print(f"featurizing with {model_name}")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     left_padding = tokenizer.padding_side == "left"
@@ -203,6 +222,7 @@ def get_huggingface_embeddings(
         "weighted_average": weighted_average_pool,
     }
 
+    autocast_enabled = device == "cuda" or (hasattr(device, "type") and device.type == "cuda")
     embeddings_list = []
     for i in tqdm(
         range(0, len(texts), batch_size), desc=f"Processing with {model_name}"
@@ -216,19 +236,23 @@ def get_huggingface_embeddings(
             return_tensors="pt",
         ).to(device)
 
-        with torch.no_grad():
+        with torch.inference_mode(), torch.autocast(
+            device_type="cuda", dtype=torch.bfloat16, enabled=autocast_enabled
+        ):
             outputs = model(**encoded_input)
             pooled = pooling_functions[pooling_method](
                 outputs.last_hidden_state, encoded_input["attention_mask"]
             )
-
             if normalize_embeddings:
                 pooled = F.normalize(pooled, p=2, dim=1)
-            embeddings_list.append(pooled.cpu().numpy())
+        # bf16 -> float32 (numpy has no bf16); also frees the autocast graph.
+        embeddings_list.append(pooled.float().cpu().numpy())
 
-        torch.cuda.empty_cache()
-
-    return np.concatenate(embeddings_list, axis=0)
+    embeddings = np.concatenate(embeddings_list, axis=0)
+    if cache:
+        np.save(cache, embeddings)
+        print(f"cached embeddings to {cache}")
+    return embeddings
 
 
 def get_sentence_transformer_embeddings(

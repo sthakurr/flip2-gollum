@@ -907,3 +907,5 @@ FodyWeavers.xsd
 scratch/
 
 tests/
+
+embeddings_cache/

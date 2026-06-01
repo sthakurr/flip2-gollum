@@ -85,10 +85,12 @@ class BotorchOptimizer:
         )
 
         if self.batch_size == 1:
-            new_x = self.optimize_acquisition_function(design_space)
-            return [new_x]
+            best_point, _best_indices, _acq_values = self.optimize_acquisition_function(
+                design_space
+            )
+            return [best_point]
         else:
-            candidates = self.optimize_acquisition_function_batch(
+            candidates, _indices, _acq_values = self.optimize_acquisition_function_batch(
                 train_x,
                 train_y,
                 design_space,
@@ -98,10 +100,21 @@ class BotorchOptimizer:
     def optimize_acquisition_function(
         self,
         design_space,
+        chunk_size: int = 256,
     ):
+        # Evaluate the acquisition function in chunks over the design space. For
+        # high-dimensional reps (e.g. one-hot, D~1786) in float64 the kernel
+        # materializes an (N, n_train, D) intermediate; doing all N candidates at
+        # once OOMs, so we process `chunk_size` candidates at a time.
         with torch.no_grad():
-            X = design_space.unsqueeze(-2)  
-            acq_values = self.acquisition_function(X).squeeze(-1)
+            X = design_space.unsqueeze(-2)
+            acq_chunks = []
+            for start in range(0, X.shape[0], chunk_size):
+                chunk = X[start : start + chunk_size]
+                # reshape(-1) (not squeeze(-1)): a size-1 chunk would otherwise
+                # collapse to a 0-dim scalar that torch.cat can't concatenate.
+                acq_chunks.append(self.acquisition_function(chunk).reshape(-1))
+            acq_values = torch.cat(acq_chunks, dim=0)
         best_indices = acq_values.topk(1)[1]
         best_point = X[best_indices].squeeze(1)
         return best_point, best_indices, acq_values
@@ -114,7 +127,6 @@ class BotorchOptimizer:
             candidate_acq_values = []
 
             for i in range(self.batch_size):
-                print("acq function output: ", self.optimize_acquisition_function(design_space))
                 best_point, best_indices, acq_values = (
                     self.optimize_acquisition_function(design_space)
                 )

@@ -49,4 +49,3 @@ name: esm2_pca
 mode: gate
 n_iters: 3
 seed: 0
-group: flip2_rep_comparison

@@ -12,6 +12,7 @@ from gollum.data.utils import torch_delete_rows
 from gollum.initialization.initializers import BOInitializer
 from gollum.data.utils import find_duplicates, find_nan_rows
 from gollum.featurization.base import Featurizer
+from sklearn.decomposition import PCA
 from abc import ABC
 import os
 os.environ["OMP_NUM_THREADS"] = "28"
@@ -84,6 +85,7 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         # Optional PCA reduction (int n_components or float variance fraction),
         # fit on train rows to avoid test leakage.
         self.reduce_dim = reduce_dim
+        print(f"reduce_dim: {self.reduce_dim}")
         # Optional cap on the test design space for very large test splits.
         self.test_subsample = test_subsample
         self.maximize = maximize
@@ -275,8 +277,6 @@ class BaseDataModule(pl.LightningDataModule, ABC):
 
         # Optional PCA reduction to the effective dimension (fit on train rows).
         if self.reduce_dim:
-            from sklearn.decomposition import PCA
-
             pca = PCA(n_components=self.reduce_dim, random_state=0)
             pca.fit(self.x[fit_idx].cpu().numpy())
             reduced = pca.transform(self.x.cpu().numpy())

@@ -1,3 +1,7 @@
+"""
+Training script for Gollum BO. Can run in "gate" mode to just evaluate surrogate quality on a held-aside test split, "bo" mode to run the Phase-2 BO loop, or "both" to do BO then gate. Example
+Usage: python train.py --config configs/flip2_arms/esm2_dense.yaml --seed 1 --n_iters 3 --mode both
+"""
 import warnings
 from botorch.exceptions import InputDataWarning
 
@@ -342,7 +346,7 @@ def train(config):
     run_name = make_run_name(config, mode)
 
     with wandb.init(
-        project="gollum", config=wandb_config, group=config["group"], name=run_name
+        project="flip2_gollum_rep_comparison", config=wandb_config, group=config["group"], name=run_name
     ) as run:
 
         dm = setup_data(config)
@@ -402,7 +406,10 @@ def main():
     # Initialize the parser with a description
     parser = ArgumentParser(
         description="Training script",
-        default_config_files=["configs/flip2_arms/esm2_pca.yaml"],
+        # No default config: arm configs are self-contained and passed via
+        # --config. A default config would otherwise leak its keys (e.g.
+        # reduce_dim) into any run whose --config omits them.
+        default_config_files=[],
     )
     parser.add_argument("--config", action=ActionConfigFile)
     parser.add_argument("--seed", type=int, help="Random seeds to use")

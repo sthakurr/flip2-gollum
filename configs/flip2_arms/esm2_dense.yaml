@@ -10,6 +10,7 @@ data:
     respect_split: true
     split_column: set
     normalize_input: standard_scaling_per_dim
+    reduce_dim: null               # no PCA for this arm (guard against config-merge leaks)
     featurizer:
       class_path: gollum.data.module.Featurizer
       init_args:
@@ -47,4 +48,3 @@ name: esm2_dense
 mode: gate
 n_iters: 3
 seed: 0
-group: flip2_rep_comparison

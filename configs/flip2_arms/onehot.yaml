@@ -11,6 +11,7 @@ data:
     respect_split: true          # honor the FLIP train/test `set` column
     split_column: set
     normalize_input: standard_scaling_per_dim
+    reduce_dim: null               # no PCA for this arm (guard against config-merge leaks)
     featurizer:
       class_path: gollum.data.module.Featurizer
       init_args:
@@ -20,7 +21,7 @@ data:
       class_path: gollum.initialization.initializers.BOInitializer
       init_args:
         method: true_random
-        n_clusters: 288            # Phase-1 budget (~3 x 96)
+        n_clusters: 96            # Phase-1 budget (~3 x 96)
 bo:
   class_path: gollum.bo.optimizer.BotorchOptimizer
   init_args:
@@ -44,7 +45,6 @@ surrogate_model:
     initial_outputscale_val: 1.0
     initial_lengthscale_val: 3.0
 name: onehot                       # W&B run name base
-mode: gate                         # gate | bo | both (override with --mode)
-n_iters: 3                         # Phase-2 BO iterations (used in bo/both)
+mode: both                         # both = collect 96+3x96 via BO over train, then eval on test
+n_iters: 3                         # BO iterations collecting batch_size points each
 seed: 0
-group: flip2_rep_comparison

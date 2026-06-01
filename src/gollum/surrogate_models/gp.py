@@ -1,4 +1,6 @@
 # from __future__ import annotations
+import sys
+
 from gollum.featurization.deep import BaseNNFeaturizer
 from botorch import fit_gpytorch_mll
 from botorch.models.gp_regression import SingleTaskGP
@@ -83,6 +85,7 @@ class GP(SurrogateModel, SingleTaskGP):
         }
 
         existing_parameters = {name for name, _ in self.named_parameters()}
+        print(f"Existing parameters in the model: {existing_parameters}")
         hypers_to_use = {
             k: torch.tensor(v)
             for k, v in hypers.items()

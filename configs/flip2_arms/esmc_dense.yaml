@@ -11,11 +11,12 @@ data:
     respect_split: true
     split_column: set
     normalize_input: standard_scaling_per_dim
+    reduce_dim: null               # no PCA for this arm (guard against config-merge leaks)
     featurizer:
       class_path: gollum.data.module.Featurizer
       init_args:
         representation: get_esmc_embeddings
-        model_name: esmc_300m
+        model_name: esmc_600m
         pooling_method: average
     initializer:
       class_path: gollum.initialization.initializers.BOInitializer
@@ -48,4 +49,3 @@ name: esmc_dense
 mode: gate
 n_iters: 3
 seed: 0
-group: flip2_rep_comparison
