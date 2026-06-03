@@ -105,8 +105,29 @@ MODEL_CONFIGS = {
     ),
 }
 
+def _is_esmc_model(model_name: str) -> bool:
+    name = model_name.lower()
+    return "esmc" in name or "evolutionaryscale/esmc" in name
+
+
+def _normalize_esmc_model_name(model_name: str) -> str:
+    normalized = model_name.lower()
+    if "600m" in normalized:
+        return "esmc_600m"
+    if "300m" in normalized:
+        return "esmc_300m"
+    return "esmc_600m"
 
 def get_model_and_tokenizer(model_name: str, device: str='cuda'):
+
+    if _is_esmc_model(model_name):
+        from esm.models.esmc import ESMC
+
+        esmc_name = _normalize_esmc_model_name(model_name)
+        torch_device = torch.device(device if torch.cuda.is_available() else "cpu")
+        model = ESMC.from_pretrained(esmc_name, device=torch_device).to(torch_device)
+        tokenizer = model.tokenizer
+        return model, tokenizer
 
     if "prot_t5" in model_name.lower():
         tokenizer = T5Tokenizer.from_pretrained(model_name, do_lower_case=False, legacy=True)
@@ -136,6 +157,38 @@ def get_tokens(
     device="cuda" if torch.cuda.is_available() else "cpu",
 ):
     print(model_name, "for get tokens")
+
+    if _is_esmc_model(model_name):
+        from esm.tokenization import get_esmc_model_tokenizers
+
+        tokenizer = get_esmc_model_tokenizers()
+        token_batches = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            encoded = tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_tensors="pt",
+            )
+            ids = encoded.get("input_ids")
+            if ids is None:
+                ids = encoded["sequence_tokens"]
+            masks = encoded.get("attention_mask")
+            if masks is None:
+                masks = (ids != tokenizer.pad_token_id).long()
+
+            pad_len = 512 - ids.size(1)
+            if pad_len > 0:
+                ids = torch.nn.functional.pad(ids, (0, pad_len), value=tokenizer.pad_token_id)
+                masks = torch.nn.functional.pad(masks, (0, pad_len), value=0)
+
+            token_batches.append(torch.cat([ids, masks], dim=1))
+
+        all_encoded_inputs = torch.cat(token_batches, dim=0)
+        return all_encoded_inputs.cpu().numpy()
+
     if "prot_t5" in model_name.lower():
         tokenizer = T5Tokenizer.from_pretrained(model_name, do_lower_case=False, legacy=True)
         # ProtT5 requires space-separated amino acids
