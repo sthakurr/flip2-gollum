@@ -2,7 +2,37 @@
   "permissions": {
     "allow": [
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import peft; print\\(peft.__version__\\)\")",
+      "Bash(pip show *)",
+      "Read(//users/ssaumya/miniforge3/envs/gollum/lib/python3.10/site-packages/peft/tuners/**)",
+      "Read(//users/ssaumya/miniforge3/envs/gollum/lib/python3.10/site-packages/gpytorch/kernels/**)",
+      "Bash(chmod +x /capstor/store/cscs/swissai/a131/ssaumya/gollum/jobs/flip2_test_eval.sh)",
+      "Read(//iopsstor/scratch/cscs/ssaumya/gollum_models/esm2_t33_650M_UR50D_seed1/**)",
+      "Bash(chmod +x /capstor/store/cscs/swissai/a131/ssaumya/gollum/jobs/flip2_manuscript_frozen.sh)",
+      "Bash(python3 -c \"import pandas as pd; df = pd.read_csv\\('two_to_many.csv-3.gz', compression='gzip'\\); print\\(df.shape\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.head\\(3\\)\\)\")",
+      "Bash(python3 -c \"import pandas as pd; df = pd.read_csv\\('by_position_train.csv'\\); print\\(df.shape\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.head\\(3\\)\\)\")",
+      "Bash(python3 -c \"from peft import PeftModel; help\\(PeftModel.disable_adapter_layers\\)\")",
+      "Bash(conda run *)",
+      "Read(//usr/**)",
+      "Read(//capstor/**)",
+      "Read(//home/**)",
+      "Bash(wait)",
+      "Read(//opt/**)",
+      "Bash(python3 -c \"import sys; print\\(sys.path\\)\")",
+      "Bash(awk -F',' 'NR>1 {print $3, $4}' /capstor/store/cscs/swissai/a131/ssaumya/gollum/data/flip2/nucB/two_to_many_train.csv)",
+      "Bash(awk -F',' 'NR>1 {print $3, $4}' /capstor/store/cscs/swissai/a131/ssaumya/gollum/data/flip2/nucB/two_to_many_test.csv)",
+      "Bash(python3 -c \"import gpytorch; help\\(gpytorch.kernels.ScaleKernel.forward\\)\")",
+      "Bash(python3 -c \"import gpytorch; k = gpytorch.kernels.ScaleKernel\\(gpytorch.kernels.MaternKernel\\(nu=2.5\\)\\); print\\(hasattr\\(k, 'device'\\)\\)\")",
+      "Bash(python scripts/compute_mti.py --help)",
+      "Bash(python -c ' *)",
+      "Read(//iopsstor/scratch/cscs/ssaumya/gollum_models/**)",
+      "Bash(python3 scripts/debug_wandb_runs.py --project sthakurr/gollum-flip2 --n 3 --state finished)",
+      "Bash(python3 -c \"import sys; print\\(sys.prefix\\)\")",
+      "Read(//iopsstor/**)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/capstor/store/cscs/swissai/a131/ssaumya/gollum/scripts/plot_pairwise_distances.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -)"
     ]
   }
 }

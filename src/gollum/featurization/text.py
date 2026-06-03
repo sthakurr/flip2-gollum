@@ -131,13 +131,13 @@ def _normalize_esmc_model_name(model_name: str) -> str:
 
 # Module-level cache keyed by (model_name, device) — avoids reloading the same
 # model into VRAM on every call to get_huggingface_embeddings (2A fix).
-_MODEL_CACHE: dict = {}
+# _MODEL_CACHE: dict = {}
 
 
 def get_model_and_tokenizer(model_name: str, device: str = 'cuda'):
-    cache_key = (model_name, device)
-    if cache_key in _MODEL_CACHE:
-        return _MODEL_CACHE[cache_key]
+    # cache_key = (model_name, device)
+    # if cache_key in _MODEL_CACHE:
+    #     return _MODEL_CACHE[cache_key]
 
     if _is_esmc_model(model_name):
         from esm.models.esmc import ESMC
@@ -172,7 +172,7 @@ def get_model_and_tokenizer(model_name: str, device: str = 'cuda'):
             torch_dtype=_dtype,
         )
 
-    _MODEL_CACHE[cache_key] = (model, tokenizer)
+    # _MODEL_CACHE[cache_key] = (model, tokenizer)
     return model, tokenizer
 
 
@@ -261,11 +261,46 @@ def get_huggingface_embeddings(
 ):
     """
     General function to get embeddings from a HuggingFace transformer model.
+    Also supports ESMC (EvolutionaryScale), which uses a non-HF API.
     """
     print(f"featurizing with {model_name}")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
-    left_padding = tokenizer.padding_side == "left"
     model.eval()
+
+    if _is_esmc_model(model_name):
+        # ESMC uses sequence_tokens/embeddings instead of HF input_ids/last_hidden_state
+        output = None
+        write_idx = 0
+        for i in tqdm(range(0, len(texts), batch_size), desc=f"Processing with {model_name}"):
+            batch_texts = texts[i : i + batch_size]
+            encoded = tokenizer(
+                batch_texts,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt",
+            )
+            ids = encoded.get("input_ids")
+            if ids is None:
+                ids = encoded["sequence_tokens"]
+            masks = encoded.get("attention_mask")
+            if masks is None:
+                masks = (ids != tokenizer.pad_token_id).long()
+            ids, masks = ids.to(device), masks.to(device)
+            with torch.no_grad():
+                esmc_out = model(sequence_tokens=ids, sequence_id=None)
+            pooled = average_pool(esmc_out.embeddings.float(), masks)
+            if normalize_embeddings:
+                pooled = F.normalize(pooled, p=2, dim=1)
+            batch_np = pooled.cpu().numpy()
+            if output is None:
+                output = np.empty((len(texts), batch_np.shape[1]), dtype=batch_np.dtype)
+            output[write_idx : write_idx + batch_np.shape[0]] = batch_np
+            write_idx += batch_np.shape[0]
+            torch.cuda.empty_cache()
+        return output
+
+    left_padding = tokenizer.padding_side == "left"
 
     # ProtT5 requires space-separated amino acids
     if "prot_t5" in model_name.lower():
@@ -306,7 +341,7 @@ def get_huggingface_embeddings(
 
             if normalize_embeddings:
                 pooled = F.normalize(pooled, p=2, dim=1)
-            batch_np = pooled.cpu().numpy()
+            batch_np = pooled.float().cpu().numpy()
 
         if output is None:
             output = np.empty((len(texts), batch_np.shape[1]), dtype=batch_np.dtype)

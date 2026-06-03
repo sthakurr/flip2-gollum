@@ -29,9 +29,30 @@ import os
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
+def _pairwise_contrastive_means(emb, y, low_thr, high_thr):
+    """Mean pairwise L2 distances for hh/hl/ll pairs in embedding space.
+
+    Returns (hh_mean, hl_mean, ll_mean) or (None, None, None) if too few points.
+    Avoids importing from analysis.py to prevent circular imports.
+    """
+    high_mask = y >= high_thr
+    low_mask = y < low_thr
+    if high_mask.sum() < 1 or low_mask.sum() < 1:
+        return None, None, None
+    dists = torch.cdist(emb, emb, p=2)
+    hh = dists[high_mask][:, high_mask].flatten()
+    hl = dists[high_mask][:, low_mask].flatten()
+    ll = dists[low_mask][:, low_mask].flatten()
+    return (
+        hh.mean().item() if hh.numel() > 0 else None,
+        hl.mean().item() if hl.numel() > 0 else None,
+        ll.mean().item() if ll.numel() > 0 else None,
+    )
+
+
 class SurrogateModel(ABC):
     @abstractmethod
-    def fit(self):
+    def fit(self, epoch: int = 0):
         pass
 
     @abstractmethod
@@ -93,7 +114,7 @@ class GP(SurrogateModel, SingleTaskGP):
         self.gp_lr = gp_lr
         self.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
-    def fit(self):
+    def fit(self, epoch: int = 0):
         self.train()
         self.likelihood.train()
         mll = ExactMarginalLogLikelihood(self.likelihood, self)
@@ -147,6 +168,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         scale_embeddings: bool = False,
         train_mll_additionally: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
+        max_fit_iter: int = 50,
     ) -> None:
 
         tkwargs = {
@@ -209,6 +231,8 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.wd_llm = wd_llm
         self.scale_embeddings = scale_embeddings
         self.train_mll_additionally = train_mll_additionally
+        self.max_fit_iter = max_fit_iter
+        self._global_ft_step = 0
 
         self.to_gpu()
 
@@ -217,12 +241,14 @@ class DeepGP(SurrogateModel, SingleTaskGP):
 
         if self.scale_embeddings:
             finetuned = self.scale_to_bounds(finetuned)
-        # Removed self.finetuned assignment — storing as instance attr caused
-        # the tensor to accumulate on GPU across iterations (2C fix).
+
+        # CPU-detached copy for contrastiveness logging — avoids GPU accumulation
+        # (detach removes the computation graph; cpu() keeps it off VRAM).
+        self._last_finetuned_emb = finetuned.detach().cpu().float()
 
         mean_x = self.mean_module(finetuned)
         covar_x = self.covar_module(finetuned)
-        
+
         if wandb.run is not None:
             wandb.log({"lr/llm_lr": self.optimizer.param_groups[0]["lr"]})
             wandb.log({"lr/gp_lr": self.optimizer.param_groups[1]["lr"]})
@@ -238,7 +264,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.train_targets = self.train_targets.to(device)
         self.train_y = self.train_y.to(device)
 
-    def fit(self):
+    def fit(self, epoch: int = 0):
         self.train()
         self.likelihood.train()
         self.finetuning_model.train()
@@ -247,12 +273,55 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         mll.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
+        # ── Contrastiveness baseline (computed once at start of each fit()) ───
+        _cb = None  # contrastiveness baseline dict
+        if wandb.run is not None:
+            wandb.define_metric("finetuning/contrastiveness", step_metric="epoch")
+            try:
+                self.finetuning_model.eval()
+                with torch.no_grad():
+                    _init_emb = self.finetuning_model(self.train_x).detach().cpu().float()
+                self.finetuning_model.train()
+                _y = self.train_targets.squeeze().cpu().float()
+                _low_thr = torch.quantile(_y, 0.2).item()
+                _high_thr = torch.quantile(_y, 0.8).item()
+                _hh0, _hl0, _ll0 = _pairwise_contrastive_means(_init_emb, _y, _low_thr, _high_thr)
+                del _init_emb
+                if None not in (_hh0, _hl0, _ll0):
+                    _cb = {"hh": _hh0, "hl": _hl0, "ll": _ll0,
+                           "y": _y, "low_thr": _low_thr, "high_thr": _high_thr}
+            except Exception as exc:
+                print(f"[contrastiveness] Baseline computation failed: {exc}")
+        # ─────────────────────────────────────────────────────────────────────
+
         def gp_closure():
             self.optimizer.zero_grad()
             output = self(self.train_x)
             mll_loss = -mll(output, self.train_targets.squeeze())
             mll_loss.backward()
             grads = [p.grad for p in self.parameters() if p.requires_grad]
+
+            if wandb.run is not None and _cb is not None:
+                try:
+                    emb = getattr(self, "_last_finetuned_emb", None)
+                    if emb is not None:
+                        _hh, _hl, _ll = _pairwise_contrastive_means(
+                            emb, _cb["y"], _cb["low_thr"], _cb["high_thr"]
+                        )
+                        if None not in (_hh, _hl, _ll):
+                            contrastiveness = (
+                                (1 / 3) * (_cb["hh"] - _hh)
+                                + (1 / 3) * (_cb["ll"] - _ll)
+                                + (1 / 3) * (_hl - _cb["hl"])
+                            )
+                            wandb.log({
+                                "finetuning/contrastiveness": contrastiveness,
+                                "epoch": epoch,
+                            })
+                except Exception:
+                    pass
+
+            self._global_ft_step += 1
             return mll_loss, grads
 
         self.optimizer = torch.optim.AdamW(
@@ -283,8 +352,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
             mll,
             closure=gp_closure,
             optimizer=fit_gpytorch_mll_torch,
-            optimizer_kwargs={"optimizer": self.optimizer, "scheduler": scheduler},
-            
+            optimizer_kwargs={"optimizer": self.optimizer, "scheduler": scheduler, "step_limit": self.max_fit_iter},
         )
 
         if self.train_mll_additionally:

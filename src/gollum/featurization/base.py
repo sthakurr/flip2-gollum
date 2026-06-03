@@ -4,6 +4,23 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 
+_AA_ALPHABET = "ACDEFGHIKLMNPQRSTVWY"
+_AA_TO_IDX = {aa: i for i, aa in enumerate(_AA_ALPHABET)}
+
+
+def protein_one_hot(sequences):
+    """Flat one-hot encoding of fixed-length protein sequences (20 standard AAs)."""
+    n = len(sequences)
+    L = len(sequences[0])
+    out = np.zeros((n, L * len(_AA_ALPHABET)), dtype=np.float64)
+    for i, seq in enumerate(sequences):
+        for j, aa in enumerate(seq):
+            idx = _AA_TO_IDX.get(aa.upper())
+            if idx is not None:
+                out[i, j * len(_AA_ALPHABET) + idx] = 1.0
+    return out
+
+
 
 class Featurizer:
     """
@@ -52,6 +69,7 @@ class Featurizer:
             "instructor_embeddings": instructor_embeddings,
             "precalculated": precalculated,
             "all_continuous": all_continuous,
+            "protein_one_hot": protein_one_hot,
         }
 
         # Reaction featurizers are optional (rxnfp may not be installed)

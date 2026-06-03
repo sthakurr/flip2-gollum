@@ -1,0 +1,22 @@
+program: sweep_run.py
+method: random
+project: gollum_flip2
+parameters:
+  config_file:
+    values:
+      - configs/flip2_llm_top5.yaml
+      - configs/flip2_pllmphi_top5.yaml
+      - configs/flip2_onehot_top5.yaml
+  dataset:
+    values:
+      - alpha-amylase/one_to_many
+      - alpha-amylase/by_mutation
+      - alpha-amylase/close_to_far
+      - alpha-amylase/far_to_close
+      - ired/two_to_many
+  n_iters:
+    values: [3]
+  n_train_iter:
+    values: [3, 6, 9]
+  seed:
+    values: [1, 10, 43]

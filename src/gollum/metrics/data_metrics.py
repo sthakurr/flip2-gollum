@@ -47,47 +47,67 @@ def log_data_stats(data_metrics):
         wandb.summary[key] = value.item() if torch.is_tensor(value) else value
 
 
-def log_bo_metrics(data_stats, train_y, epoch=0):
+def log_bo_metrics(data_stats, train_y, epoch=0, extra=None):
     """
     Log bo-specific metrics (quantiles, top counts and best so far) to WandB.
+    All metrics are batched into a single wandb.log call to avoid duplicate steps.
     """
-    log_best_so_far(train_y, epoch)
-    log_top_n_counts(data_stats, train_y, epoch)
-    log_quantile_counts(data_stats, train_y, epoch)
-    log_top5pct_coverage(data_stats, train_y, epoch)
+    metrics = {"epoch": epoch}
+    metrics.update(_best_so_far_metrics(train_y))
+    metrics.update(_top_n_count_metrics(data_stats, train_y))
+    metrics.update(_quantile_count_metrics(data_stats, train_y))
+    metrics.update(_top5pct_coverage_metrics(data_stats, train_y))
+    if extra:
+        metrics.update(extra)
+    wandb.log(metrics)
 
 
-def log_top5pct_coverage(data_stats, train_y, epoch=0):
+def _top5pct_coverage_metrics(data_stats, train_y):
+    if train_y.numel() == 0:
+        return {}
     total = data_stats["total_q95_count"].item()
     if total > 0:
         threshold = data_stats["target_q95"]
         found = (train_y >= threshold).sum().item()
-        wandb.log({"top5pct_coverage": found / total, "epoch": epoch})
+        return {"top5pct_coverage": found / total}
+    return {}
 
 
-def log_best_so_far(train_y, epoch=0):
-    """
-    Log the best-so-far value to WandB.
-    """
-    best_so_far = torch.max(train_y).item()
-    wandb.log({"train/best_so_far": best_so_far, "epoch": epoch})
+def _best_so_far_metrics(train_y):
+    if train_y.numel() == 0:
+        return {}
+    return {"train/best_so_far": torch.max(train_y).item()}
 
 
-def log_top_n_counts(data_stats, train_y, epoch=0):
-    """
-    Log the count of top N values to WandB.
-    """
+def _top_n_count_metrics(data_stats, train_y):
+    if train_y.numel() == 0:
+        return {}
+    metrics = {}
     for n in [1, 3, 5, 10]:
         threshold = data_stats[f"top_{n}"]
-        count = (train_y >= threshold).sum().item()
-        wandb.log({f"top_{n}_count": count, "epoch": epoch})
+        metrics[f"top_{n}_count"] = (train_y >= threshold).sum().item()
+    return metrics
 
 
-def log_quantile_counts(data_stats, train_y, epoch=0):
-    """
-    Log the count of quantiles to WandB.
-    """
+def _quantile_count_metrics(data_stats, train_y):
+    if train_y.numel() == 0:
+        return {}
+    metrics = {}
     for q in [0.75, 0.9, 0.95, 0.99]:
         threshold = data_stats[f"target_q{int(q * 100)}"]
-        count = (train_y >= threshold).sum().item()
-        wandb.log({f"quantile_{int(q * 100)}_count": count, "epoch": epoch})
+        metrics[f"quantile_{int(q * 100)}_count"] = (train_y >= threshold).sum().item()
+    return metrics
+
+
+# Keep old names as thin wrappers for any external callers
+def log_top5pct_coverage(data_stats, train_y, epoch=0):
+    wandb.log({"top5pct_coverage": _top5pct_coverage_metrics(data_stats, train_y).get("top5pct_coverage"), "epoch": epoch})
+
+def log_best_so_far(train_y, epoch=0):
+    wandb.log({"train/best_so_far": torch.max(train_y).item(), "epoch": epoch})
+
+def log_top_n_counts(data_stats, train_y, epoch=0):
+    wandb.log({**_top_n_count_metrics(data_stats, train_y), "epoch": epoch})
+
+def log_quantile_counts(data_stats, train_y, epoch=0):
+    wandb.log({**_quantile_count_metrics(data_stats, train_y), "epoch": epoch})

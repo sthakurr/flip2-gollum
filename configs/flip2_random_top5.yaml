@@ -1,0 +1,24 @@
+data:
+  class_path: gollum.data.module.BaseDataModule
+  init_args:
+    data_path: data/flip2/alpha-amylase/one_to_many_train.csv
+    input_column: sequence
+    target_column: target
+    maximize: true
+    exclude_top: true
+    normalize_input: standard_scaling
+    featurizer:
+      class_path: gollum.data.module.Featurizer
+      init_args:
+        representation: protein_one_hot
+    initializer:
+      class_path: gollum.initialization.initializers.BOInitializer
+      init_args:
+        method: true_random
+        n_clusters: 96
+
+n_iters: 10
+batch_size: 96
+seed: 0
+n_seeds: 1
+wandb_project: flip2_gollum_top5

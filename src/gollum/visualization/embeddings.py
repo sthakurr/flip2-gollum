@@ -4,6 +4,10 @@ import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+plt.style.use('seaborn-v0_8-paper')
+# Okabe-Ito color-blind safe palette (Wong 2011, Nature Methods)
+_CB = ['#0072B2', '#E69F00', '#009E73', '#56B4E9', '#D55E00', '#CC79A7', '#F0E442', '#000000']
+plt.rcParams['axes.prop_cycle'] = plt.cycler(color=_CB)
 from umap import UMAP
 
 from gollum.featurization.text import get_huggingface_embeddings, get_tokens

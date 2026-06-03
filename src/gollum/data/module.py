@@ -27,6 +27,7 @@ class BaseDataModule(ABC):
         initializer: BOInitializer = None,
         exclude_top: bool = False,
         normalize_input: str = "standard_scaling",
+        test_data_path: Optional[str] = None,
     ) -> None:
         self.data_path = data_path
         self.target_column = target_column
@@ -41,6 +42,9 @@ class BaseDataModule(ABC):
         self.exclude_top = exclude_top
         self.normalize_input = normalize_input
         self.maximize = maximize
+        self.test_data_path = test_data_path
+        self.test_x = None
+        self.test_y = None
         self.setup()
 
     def load_data(self):
@@ -111,9 +115,9 @@ class BaseDataModule(ABC):
         self.heldout_y = self.heldout_y[sorted_indices]
         self.heldout_indices = self.heldout_indices[sorted_indices]
 
-        # Reindex in a single pass instead of copy + copy + concat (3B fix).
-        ordered_indices = train_df_indices + self.heldout_indices.tolist()
-        self.data = self.data.loc[ordered_indices].reset_index(drop=True)
+        train_df = self.data.loc[train_df_indices].copy()
+        heldout_df = self.data.loc[self.heldout_indices.tolist()].copy()
+        self.data = pd.concat([train_df, heldout_df])
         
 
     def update_results(self, experiment_results, experiment_indices):
@@ -134,23 +138,32 @@ class BaseDataModule(ABC):
         self.train_indexes = torch.cat([self.train_indexes, experiment_indices], dim=0)
 
     def normalize_data(self):
-        def standard_scaling(X):
-            return (X - X.mean()) / X.std()
-
-        def l2_max_scaling(X):
-            return X / torch.norm(X, dim=1).max()
-
-        def l2_normalize(X):
-            return X / torch.norm(X, dim=1, keepdim=True)
+        self._norm_mean: Optional[torch.Tensor] = None
+        self._norm_std:  Optional[torch.Tensor] = None
 
         if self.normalize_input == "standard_scaling":
-            self.x = standard_scaling(self.x)
+            self._norm_mean = self.x.mean()
+            self._norm_std  = self.x.std()
+            self.x = (self.x - self._norm_mean) / self._norm_std
         elif self.normalize_input == "l2_max_scaling":
-            self.x = l2_max_scaling(self.x)
+            self.x = self.x / torch.norm(self.x, dim=1).max()
         elif self.normalize_input == "l2_normalize":
-            self.x = l2_normalize(self.x)
+            self.x = self.x / torch.norm(self.x, dim=1, keepdim=True)
         elif self.normalize_input == "original":
             pass
+
+    def load_test_data(self):
+        test_df = pd.read_csv(self.test_data_path)
+        x = self.featurizer.featurize(test_df[self.input_column])
+        y = test_df[self.target_column].values
+        self.test_x = torch.from_numpy(x).to(torch.float64)
+        self.test_y = torch.from_numpy(y).to(torch.float64).unsqueeze(-1)
+        if not self.maximize:
+            self.test_y = -self.test_y
+        # Apply the same normalization that was fitted on training features.
+        if self._norm_mean is not None and self._norm_std is not None:
+            self.test_x = (self.test_x - self._norm_mean) / self._norm_std
+        print(f"Loaded {len(self.test_x)} test sequences from {self.test_data_path}")
 
     def setup(self, stage: Optional[str] = None) -> None:
         self.load_data()
@@ -158,6 +171,8 @@ class BaseDataModule(ABC):
         self.preprocess_data()
         self.normalize_data()
         self.split_data()
+        if self.test_data_path is not None:
+            self.load_test_data()
 
     def train_dataloader(self) -> DataLoader:
         train_dataset = SingleSampleDataset(self.train_x, self.train_y)
@@ -166,3 +181,106 @@ class BaseDataModule(ABC):
     def val_dataloader(self) -> DataLoader:
         valid_dataset = SingleSampleDataset(self.heldout_x, self.heldout_y)
         return DataLoader(valid_dataset, num_workers=4)
+
+
+class SplitDataModule(BaseDataModule):
+    """
+    Redesigned data module for train/test-split evaluation:
+      - Seed training set : n_train examples randomly drawn from train_path
+      - Candidate space   : all sequences from test_path
+
+    dm.x              = cat([sampled_train_features, all_test_features])
+    dm.train_indexes  = indices 0..n_train-1  (into dm.x)
+    dm.heldout_indices = indices n_train..n_train+n_test-1 (into dm.x)
+    """
+
+    def __init__(
+        self,
+        train_path: str,
+        test_path: str,
+        n_train: int,
+        input_column: Union[str, List[str]] = "sequence",
+        target_column: str = "target",
+        maximize: bool = True,
+        featurizer: Featurizer = None,
+        normalize_input: str = "original",
+        # Accept but ignore BaseDataModule args that bleed through from bochemian.yaml defaults
+        data_path: Optional[str] = None,
+        test_data_path: Optional[str] = None,
+        exclude_top: bool = False,
+        init_sample_size: int = 10,
+        initializer: Optional[BOInitializer] = None,
+    ) -> None:
+        self.train_path = train_path
+        self.test_path = test_path
+        self.n_train = n_train
+        self.input_column = input_column
+        self.target_column = target_column
+        self.maximize = maximize
+        self.featurizer = featurizer if featurizer is not None else Featurizer()
+        self.normalize_input = normalize_input
+        self.test_x = None
+        self.test_y = None
+        self.setup()
+
+    def setup(self, stage: Optional[str] = None) -> None:
+        # --- load and sample from training split ---
+        train_df = pd.read_csv(self.train_path)
+        if not self.maximize:
+            train_df[self.target_column] = -train_df[self.target_column]
+
+        n_train_all = len(train_df)
+        sampled_idx = np.sort(
+            np.random.choice(n_train_all, size=self.n_train, replace=False)
+        )
+        sampled_df = train_df.iloc[sampled_idx].reset_index(drop=True)
+
+        # --- load test split (full candidate space) ---
+        test_df = pd.read_csv(self.test_path)
+        if not self.maximize:
+            test_df[self.target_column] = -test_df[self.target_column]
+        n_test = len(test_df)
+
+        # --- featurize ---
+        sampled_x = torch.from_numpy(
+            self.featurizer.featurize(sampled_df[self.input_column])
+        ).to(torch.float64)
+        test_x = torch.from_numpy(
+            self.featurizer.featurize(test_df[self.input_column])
+        ).to(torch.float64)
+
+        sampled_y = (
+            torch.from_numpy(sampled_df[self.target_column].values)
+            .to(torch.float64)
+            .unsqueeze(-1)
+        )
+        test_y = (
+            torch.from_numpy(test_df[self.target_column].values)
+            .to(torch.float64)
+            .unsqueeze(-1)
+        )
+
+        # --- combine into unified dm.x / dm.y / dm.data with sequential index ---
+        self.x = torch.cat([sampled_x, test_x], dim=0)
+        self.y = torch.cat([sampled_y, test_y], dim=0)
+
+        test_df_indexed = test_df.reset_index(drop=True)
+        test_df_indexed.index += self.n_train
+        self.data = pd.concat([sampled_df, test_df_indexed])
+
+        self.original_indices = np.arange(len(self.x))
+
+        # --- train / heldout split ---
+        self.train_indexes = np.arange(self.n_train)
+        heldout_pos = np.arange(self.n_train, self.n_train + n_test)
+        self.heldout_indices = torch.tensor(heldout_pos)
+
+        self.train_x = self.x[self.train_indexes]
+        self.train_y = self.y[self.train_indexes]
+        self.heldout_x = self.x[heldout_pos]
+        self.heldout_y = self.y[heldout_pos]
+
+        print(
+            f"[SplitDataModule] n_train={self.n_train} from {self.train_path} "
+            f"| candidate space={n_test} from {self.test_path}"
+        )

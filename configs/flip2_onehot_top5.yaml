@@ -1,0 +1,67 @@
+data:
+  class_path: gollum.data.module.SplitDataModule
+  init_args:
+    train_path: data/flip2/alpha-amylase/close_to_far_train.csv
+    test_path: data/flip2/alpha-amylase/close_to_far_test.csv
+    n_train: 96
+    input_column: sequence
+    target_column: target
+    maximize: true
+    normalize_input: original
+    featurizer:
+      class_path: gollum.data.module.Featurizer
+      init_args:
+        representation: protein_one_hot
+bo:
+  class_path: gollum.bo.optimizer.BotorchOptimizer
+  init_args:
+    batch_strategy: "kriging"
+    batch_size: 96
+acquisition:
+  class_path: botorch.acquisition.analytic.ExpectedImprovement
+  init_args:
+    maximize: True
+surrogate_model:
+  class_path: gollum.surrogate_models.gp.GP
+  init_args:
+    likelihood:
+      class_path: gpytorch.likelihoods.GaussianLikelihood
+      init_args:
+        noise_prior: null
+        noise_constraint: null
+        batch_shape:
+          class_path: torch.Size
+    covar_module:
+      class_path: gpytorch.kernels.ScaleKernel
+      init_args:
+        base_kernel:
+          class_path: gpytorch.kernels.MaternKernel
+          init_args:
+            nu: 2.5
+            ard_num_dims: null
+            batch_shape: null
+            active_dims: null
+            lengthscale_prior: null
+            lengthscale_constraint: null
+        outputscale_prior: null
+        outputscale_constraint: null
+        ard_num_dims: null
+        batch_shape: null
+        active_dims: null
+        lengthscale_prior: null
+        lengthscale_constraint: null
+    mean_module:
+      class_path: gpytorch.means.ConstantMean
+    standardize: true
+    normalize: false
+    initial_noise_val: 1.0
+    noise_constraint: 1.0e-04
+    initial_outputscale_val: 1.0
+    initial_lengthscale_val: 3.0
+n_iters: 3
+n_train_iter: 3  # Phase 1 BO iters on train split (0 = disabled, use random n_train seed)
+n_init: 96      # initial random seed for Phase 1
+seed: 43
+save_checkpoints: false
+visualize: false
+wandb_project: gollum_flip2

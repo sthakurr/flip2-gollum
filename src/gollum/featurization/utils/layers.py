@@ -54,6 +54,7 @@ def get_target_layers(model, proportion=0.25, from_top=True):
     sorted_layer_nums = sorted(layer_numbers, reverse=from_top)
     target_layer_nums = set(sorted_layer_nums[:num_target_layers])
 
+    # PEFT matches target_modules by suffix, not full path — return unique leaf names
     target_modules = [
         name
         for layer_num, name in all_layers
@@ -61,10 +62,11 @@ def get_target_layers(model, proportion=0.25, from_top=True):
     ]
 
     print(
-        f"\nFound {len(target_modules)} linear layers "
+        f"\nFound {len(target_modules)} unique target module names "
         f"({'top' if from_top else 'bottom'} {proportion*100:.1f}% of {num_layers} layers):"
     )
     print(f"Layer numbers selected: {sorted(target_layer_nums)}")
+    # print(f"Target module names: {target_modules}")
 
     return target_modules
 

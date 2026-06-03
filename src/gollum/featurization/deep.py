@@ -8,6 +8,7 @@ from gollum.featurization.utils.pooling import average_pool, last_token_pool, we
 from gollum.featurization.text import get_model_and_tokenizer
 from gollum.featurization.utils.layers import get_target_layers
 from torch.nn import init
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 class BaseNNFeaturizer(nn.Module):
     """
@@ -103,8 +104,9 @@ class LLMFeaturizer(BaseNNFeaturizer):
                     modules_to_save=modules_to_save,
                 ),
             )
-            # Gradient checkpointing trades ~30% compute for 4-8x less activation memory.
-            # ESMC is not a HF PreTrainedModel so the call may not work — catch silently.
+            # Enable HF-native gradient checkpointing for models that support it.
+            # ESMC is not a HF PreTrainedModel, so this call is a no-op for it;
+            # ESMC uses torch.utils.checkpoint manually in get_embeddings instead.
             if hasattr(self.llm, "gradient_checkpointing_enable"):
                 try:
                     self.llm.gradient_checkpointing_enable()
@@ -138,7 +140,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
             device=torch.device("cuda"), dtype=torch.float32
         )
 
-    def get_embeddings(self, x, batch_size=4):
+    def get_embeddings(self, x, batch_size=32):
         torch.cuda.empty_cache()
 
         # dtype cast done once here, not inside the loop (2B fix)
@@ -155,16 +157,20 @@ class LLMFeaturizer(BaseNNFeaturizer):
 
         for start_idx in range(0, n_points, batch_size):
 
-            torch.cuda.empty_cache()
             end_idx = min(start_idx + batch_size, n_points)
             input_ids = x[start_idx:end_idx, :ids_split].long()
             attn_mask = x[start_idx:end_idx, ids_split:].long()
 
             if self.trainable:
                 if self._uses_esmc:
-                    outputs = self.llm(
-                        sequence_tokens=input_ids,
-                        sequence_id=None,
+                    # Manual gradient checkpointing: recomputes activations on backward
+                    # instead of storing them, trading ~30% extra compute for 4-8x less
+                    # activation memory. ESMC is not a HF PreTrainedModel so
+                    # gradient_checkpointing_enable() does nothing for it.
+                    outputs = grad_checkpoint(
+                        lambda t: self.llm(sequence_tokens=t, sequence_id=None),
+                        input_ids,
+                        use_reentrant=False,
                     )
                 else:
                     outputs = self.llm(
@@ -215,7 +221,6 @@ class LLMFeaturizer(BaseNNFeaturizer):
             current_idx += batch_len
 
             del outputs, last_hidden_state, pooled, pooled_f64
-            torch.cuda.empty_cache()
 
         return embeddings
 

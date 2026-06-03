@@ -1,0 +1,539 @@
+%%%%%%%% ICML 2026 EXAMPLE LATEX SUBMISSION FILE %%%%%%%%%%%%%%%%%
+
+\documentclass{article}
+
+% Recommended, but optional, packages for figures and better typesetting:
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs} % for professional tables
+
+% hyperref makes hyperlinks in the resulting PDF.
+% If your build breaks (sometimes temporarily if a hyperlink spans a page)
+% please comment out the following usepackage line and replace
+% \usepackage{icml2026} with \usepackage[nohyperref]{icml2026} above.
+\usepackage{hyperref}
+
+
+% Attempt to make hyperref and algorithmic work together better:
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+
+% Use the following line for the initial blind version submitted for review:
+\usepackage{icml2026}
+
+% For preprint, use
+% \usepackage[preprint]{icml2026}
+
+% If accepted, instead use the following line for the camera-ready submission:
+% \usepackage[accepted]{icml2026}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{amsthm}
+
+
+% if you use cleveref..
+\usepackage[capitalize,noabbrev]{cleveref}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% THEOREMS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% Todonotes is useful during development; simply uncomment the next line
+%    and comment out the line below the next line to turn off comments
+%\usepackage[disable,textsize=tiny]{todonotes}
+\usepackage[textsize=tiny]{todonotes}
+
+% The \icmltitle you define below is probably too long as a header.
+% Therefore, a short form for the running title is supplied here:
+\icmltitlerunning{title}
+
+\begin{document}
+
+\twocolumn[
+  \icmltitle{think think think...}
+
+  % It is OKAY to include author information, even for blind submissions: the
+  % style file will automatically remove it for you unless you've provided
+  % the [accepted] option to the icml2026 package.
+
+  % List of affiliations: The first argument should be a (short) identifier you
+  % will use later to specify author affiliations Academic affiliations
+  % should list Department, University, City, Region, Country Industry
+  % affiliations should list Company, City, Region, Country
+
+  % You can specify symbols, otherwise they are numbered in order. Ideally, you
+  % should not use this facility. Affiliations will be numbered in order of
+  % appearance and this is the preferred way.
+  \icmlsetsymbol{equal}{*}
+
+  \begin{icmlauthorlist}
+    \icmlauthor{Saumya Thakur}{equal,yyy}
+    \icmlauthor{Firstname2 Lastname2}{equal,yyy,comp}
+    \icmlauthor{Firstname3 Lastname3}{comp}
+    \icmlauthor{Firstname4 Lastname4}{sch}
+    \icmlauthor{Firstname5 Lastname5}{yyy}
+    \icmlauthor{Firstname6 Lastname6}{sch,yyy,comp}
+    \icmlauthor{Firstname7 Lastname7}{comp}
+    %\icmlauthor{}{sch}
+    \icmlauthor{Firstname8 Lastname8}{sch}
+    \icmlauthor{Firstname8 Lastname8}{yyy,comp}
+    %\icmlauthor{}{sch}
+    %\icmlauthor{}{sch}
+  \end{icmlauthorlist}
+
+  \icmlaffiliation{yyy}{Department of Chemistry, Ecole Polytechnique Federale de Lausanne, Lausanne, Switzerland}
+  \icmlaffiliation{comp}{Company Name, Location, Country}
+  \icmlaffiliation{sch}{School of ZZZ, Institute of WWW, Location, Country}
+
+  \icmlcorrespondingauthor{Firstname1 Lastname1}{first1.last1@xxx.edu}
+  \icmlcorrespondingauthor{Firstname2 Lastname2}{first2.last2@www.uk}
+
+  % You may provide any keywords that you find helpful for describing your
+  % paper; these are used to populate the "keywords" metadata in the PDF but
+  % will not be shown in the document
+  \icmlkeywords{Bayesian Optimisation, LLM, PLM}
+
+  \vskip 0.3in
+]
+
+% this must go after the closing bracket ] following \twocolumn[ ...
+
+% This command actually creates the footnote in the first column listing the
+% affiliations and the copyright notice. The command takes one argument, which
+% is text to display at the start of the footnote. The \icmlEqualContribution
+% command is standard text for equal contribution. Remove it (just {}) if you
+% do not need this facility.
+
+% Use ONE of the following lines. DO NOT remove the command.
+% If you have no special notice, KEEP empty braces:
+\printAffiliationsAndNotice{}  % no special notice (required even if empty)
+% Or, if applicable, use the standard equal contribution text:
+% \printAffiliationsAndNotice{\icmlEqualContribution}
+
+\begin{abstract}
+Bayesian Optimization (BO) campaigns provide a sample-efficient way of optimizing for a given objective by providing uncertainty-calibrated suggestions for the next iteration. While they contain knowledge obtained only from the data seen so far, large language models (LLMs) provide the advantage of broad pre-training knowledge that can augment the optimization process. In this paper, we perform an empirical study of using a hybrid LLM-augmented Gaussian Process framework to assess BO campaigns on a challenging benchmark dataset of proteins. This FLIP2 dataset mimics real-world scenarios allowing evaluation of a method on their generalizing capabilities as well. We demonstrate how using PLMs alongwith Gaussian Processes can give major advantages in real-world campaigns where the test dataset is usually out-of-distribution (OOD) compared to the training dataset available. Crucially, we show it is important to use a joint finetuning approach of LLMs with GP to obtain realistic generalizable performance on the OOD sequences. As test sequences move far from the training data, standard GP kernels suffer a "kernel collapse". We demonstrate that a joint fine-tuning approach of LLMs with GPs overcomes this limitation by dynamically restructuring the latent space. While one-hot and static embedding setups failed to generalize due to this collapse, a fine-tuned PLM achieved a Spearman correlation of ( ) on average across FLIP2 splits.
+\end{abstract}
+
+\section{Introduction}
+The discovery of novel proteins with optimized functional properties is a cornerstone of modern biotechnology, yet it remains a formidable challenge. Traditional protein engineering relies on experimental directed evolution, a process that is often prohibitively expensive and time-consuming due to the vastness of the sequence space and the low throughput of high-fidelity wet-lab assays. Furthermore, the phenomenon of epistatis, where the effect of mutation A depends strongly on mutation B, add on to the sparsity, making the fitness landscape rugged and extremely difficult to optimize. To navigate this landscape efficiently, Bayesian Optimization (BO) has emerged as a powerful framework, utilizing surrogate models like Gaussian Processes (GPs) to suggest high-fitness candidates in a sample-efficient manner.
+
+However, the success of BO is heavily dependent on the underlying protein representation. Standard approaches frequently utilize one-hot encodings or protein language model embeddings. While these can be effective for interpolation within a well-sampled training distribution, they tend to fail in generalizing to the out-of-distribution (OOD) sequences typically targeted in real-world engineering campaigns. As candidate protein sequences move far from the training data, stationary GP kernels tend to revert to zero, causing the model to lose all predictive signal and revert to the global training mean.
+
+In this paper, we perform an empirical study of \textbf{Gaussian Process optimised LLMs} framework, developed by Rankovic et al. (\citeyear{rankovic2025gollum}), on the challenging \textbf{FLIP2} benchmark. This dataset provides realistic snapshots of protein engineering campaigns, including OOD splits that mimic the discovery of unseen mutations. We first prove the limitations of traditional representations in real-world discovery campaigns by utilizing the FLIP2 benchmark. Later, we demonstrate that a \textbf{joint fine-tuning approach}, where the parameters of both the Large Language Model (LLM) and the GP are optimized together, overcomes these limitations of static representations and emerges as a novel and reliable paradigm for real-world enzyme engineering. 
+
+Our experiments suggest that while one-hot encodings and static embeddings fail to generalize to OOD test sets, an adaptive deep-kernel approach achieves statistically significant test Spearman correlations on all the splits. This highlights the benefits of joint LLM-GP optimization, providing a robust pathway for generalizable protein discovery in sample-constrained environments. We also show that the use of protein language models (PLMs) can enhance the discovery performance by upto $\langle\rangle$\%. 
+
+\section{Background and Related Work}
+There have been many recent works making use of large language models 
+\todo{mention why protein landscape is difficult to model}
+
+\subsection{Bayesian Optimization in Biology}
+Bayesian optimization (BO) is a standard framework for navigating expensive, high-dimensional search spaces usually inherent in tasks that involve expensive evaluations. It has been a standard approach in protein engineering, augmenting the traditional Directed and Continuous Evolution methods \cite{romero2013navigating}. By utilizing a surrogate model, BO provides a principled mechanism for balancing the exploration of novel sequences with the exploitation of known high-fitness regions. Historically, these surrogate models have relied on stationary kernels (e.g., Matérn or RBF) and naive representations like one-hot encodings. While effective for simple fitness landscapes, these approaches often struggle to generalize when experimental data is sparse or when targeting regions far from the training distribution
+
+\subsection{The advent of Protein Language Models}
+The transition from simple sequence alignments to self-supervised learning has enabled the extraction of rich evolutionary and structural information from massive databases like UniProt. Protein Language Models (PLMs) are one such category of downstream applications where such evolutionary information has provided breakthroughs. PLMs are specialized language models that are pre-trained using the general stack used in training foundation models but adapted to protein sequences. There are a suite of PLMs available that have demonstrated evolutionary knowledge embedded in their latent spaces. The most commonly used ones are ESM2-650M, ESMC family and CARP-600M that are essentially trained using the masked language modeling objective over protein sequences. While these "static" embeddings are powerful for zero-shot tasks, they are not inherently optimized for specific functional labels, such as thermal stability or catalytic activity. As a result, when used as inputs for regression, the distance metrics in these latent spaces may not align with the functional gradients of the fitness landscape, leading to a disconnect between sequence similarity and functional similarity.
+
+\subsection{Deep Kernel based Bayesian Optimization}
+Protein fitness landscapes are characterized by extreme sparsity and high-order epistasis. Traditional surrogate models often struggle with these landscapes because the underlying representations (embeddings) are not optimized for the specific task's geometry, leading to a disconnect between latent distance and functional similarity. To bridge the gap between discrete sequence space and functional fitness, one can move beyond static distance metrics toward deep kernel methods, where the geometry of the latent manifold is learned jointly with the surrogate model. This approach extends beyond the limitations of stationary kernels, that do not evolve according to the non-stationarity of fitness landscapes. Most of the existing methods leverage frozen PLM embeddings or zero-shot priors to perform a given downstream task. Even though there have been huge successes using these methods, the aforementioned challenge still remains to be resolved for most of the protein space. Hence, we motivate the idea of a 'joint-optimization' regime, where the representation itself evolves in response to the BO campaign's objective, and explore its effects on a challenging benchmark. This creates a bi-directional feedback loop between the LLM and the surrogate which allows the transport of epistemic uncertainty from the GP further to the LLM and the flow of evolutionary priors into the GP.
+
+\subsection{FLIP2 dataset}
+To evaluate these methodological advances, the community has moved toward benchmarks that reflect real-world engineering constraints. Released in the February of 2026, the FLIP2 benchmark \cite{didi2026flip2} provides exactly these real-world snapshots of protein engineering campaigns. It significantly expands upon its predecessor by introducing datasets spanning enzymes, protein-protein interactions, and light-sensitive proteins. Crucially, FLIP2 implements split strategies (e.g., "close-to-far" and "by-mutation") specifically designed to test a model's ability to generalize to unseen mutations—a scenario where simpler models often surprisingly outperform traditionally fine-tuned PLMs. We leverage this benchmark to quantify the benefits of joint fine-tuning in these realistic, high-extrapolation settings. 
+
+
+
+\section{Methods}
+\subsection{Gaussian Process optimized LLMs}
+Gaussian processes have been the workhorses of optimization settings for decades. Their superiority comes from their inherent nature of reporting uncertainties in the predictions that provide a principled and calibrated signal for the next iteration. One limitation is that the knowledge they have is confined to the training experimental data the GP has  seen and being fitted on. On the other hand, large language models or LLMs possess a rich set of knowledge from their pre-training setup on gigantic amounts of data. However, they tend to hallucinate and confidently provide incorrect answers. In this direction, an approach that utilizes the uncertainty quantification from the GP to calibrate the predictions from an LLM might prove to be more beneficial compared to either of these approaches individually. Recently, there have been various efforts at building hybrid frameworks while retaining the benefits of both \cite{ramos2023bayesian, rankovic2023bochemian}. While most of the works treated them as separate entities, a recent work by Rankovic et al. (\citeyear{rankovic2025gollum}) combined them under a single training objective which uncovered some fascinating phenomenons leading to improved performance, beating all the state-of-the-art baselines.  In particular, the authors showed how jointly training both LLM parameters and GP parameters together results in an implicit contrastive learning effect, eventually leading to a more structured latent space with respect to the target scores. Here, we extend that idea to study enzyme fitness landscape both from a discovery and a generalizability lense.
+
+Using the LLM or PLM embeddings as input to the GP surrogate, we can either keep the embeddings static (a stationary kernel) or finetune the language model alongside the GP training. This takes the form of a deep-kernel gaussian process where the kernel takes the following form:
+\begin{equation}
+    k(x, x^*) = k(g_{\phi}(x), g_{\phi}(x^*))
+\end{equation}
+A joint-training regime is adapted to perform finetuning of both LLM parameters $\phi$ and GP parameters $\theta$ to minimize the marginal log likelihood estimation in the following manner. 
+
+\section{Experiments and Results}
+We perform various sets of extensive experiments to benchmark the performance of LoRA-finetuning in protein space defined by FLIP2. As a baseline for optimization performance, we implement a random search strategy. In each iteration, 96 sequences are sampled uniformly at random without replacement from the candidate pool. This baseline serves to quantify the expected performance gain provided by the biological priors in the LLM and the acquisition logic of the GP. In addition to that, while we make the results from alpha-amylase one-to-many split as representative here, owing to the variance in its training and test splits, the results for other splits are included in the Appendix.
+
+\subsection{Discovery experiments on training splits}
+In order to benchmark the performance of various representations on the FLIP2 datasets, we ran the BO for 3 iterations with a batch size of 96, taking into account the usual assay sizes in protein engineering campaigns. The representations tested here are: \textbf{naive one-hot encodings}, \textbf{static LM embeddings} and \textbf{progressively finetuned LM embeddings}. We benchmark both natural language models and protein language models throughout the study. For PLMs, we tested ESM2-650M, ProtT5-1.2B and ESM-C-600M and for natural language LLM, we utilized T5. Figure \ref{fig:aa-grid} shows the top 5\% coverage obtained by various methods across all the Alpha Amylase splits.
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.49\columnwidth}
+      \centering
+      \includegraphics[width=\textwidth]{figures/top5_coverage_epoch3_alpha-amylase_one_to_many.pdf}
+      \caption{One-to-many}
+      \label{fig:aa-1}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.49\columnwidth}
+      \centering
+      \includegraphics[width=\textwidth]{figures/top5_coverage_epoch3_alpha-amylase_close_to_far.pdf}
+      \caption{Close-to-far}
+      \label{fig:aa-2}
+  \end{subfigure}
+
+  \begin{subfigure}[b]{0.49\columnwidth}
+      \centering
+      \includegraphics[width=\textwidth]{figures/top5_coverage_epoch3_alpha-amylase_far_to_close.pdf}
+      \caption{Far-to-close}
+      \label{fig:aa-3}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.49\columnwidth}
+      \centering
+      \includegraphics[width=\textwidth]{figures/top5_coverage_epoch3_alpha-amylase_by_mutation.pdf}
+      \caption{By mutation}
+      \label{fig:aa-4}
+  \end{subfigure}
+
+  \caption{Comparison of Top 5\% coverage across FLIP2 alpha-amylase splits.}
+  \label{fig:aa-grid}
+\end{figure}
+
+We suggest that while the one-hot encodings were found to be comparable to PLMs-based methods in fitness prediction tasks across all splits, the discovery campaigns show PLMs provide an outstanding advantage. This is shown in the plots in Figure \ref{fig:aa-grid}, where the static and finetuned embeddings consistently outperform the one-hot encoding performances. The results for all the other splits can be found in the Appendix C. Although there is no clear winner between static or finetuned LM regimes, there is a clear performance advantage in using a PLM, whenever possible, over the traditional one-hot encodings. Furthermore, there is no specific language model that performed best across all the splits, so it still remains a task-dependent parameter which should be tuned before performing the expensive evaluations. \todo{finish the discussion on performance of various LLMs and across splits} In addition to the regret curves, the top 5\% coverage plot shows how the one-hot suffers in discovering the highest fitness candidates in the dataset.
+
+\subsection{Generalization capabilities emerge on out-of-distribution splits}
+\todo{maybe add a split difficulty quantification here and visualize the spearmans parallely - showing how well it did on various splits?}
+Another notable finding is how these methods performed on the test splits of FLIP2 datasets. As mentioned earlier, the highlight of FLIP2 benchmark is its resemblance to real-world protein engineering campaigns where the test sets tend to extend the space to unseen mutations. Evaluating machine-learning methods on these splits enables quantification of generalization and robustness to real-world challenges. We checked the spearman rank correlation of predicted fitness values of test sequences after training the GP for 10 epochs with the actual fitness values. Surprisingly, both one-hot encodings and static embeddings failed to provide any relevant information on the test splits while the spearman values kept increasing with training on the finetuning architectures. This knowledge transfer from training split to test split, which in FLIP2 benchmarks imposes generalizability, was quite interesting to observe. This suggests how \textbf{joint fine-tuning is "actively" learning a better representation as more data arrives}. Further, this also revealed how both one-hot encodings and static embeddings fail drastically in generalizing to the out-of-distribution sequences and an adaptive approach should be utilized for real-world campaigns.
+
+\begin{figure}[t]
+  \begin{center}
+    \centerline{\includegraphics[width=\columnwidth]{figures/spearman_training.pdf}}
+    \caption{
+      Correlation of spearman $\rho$ on the test splits of alpha-amylase with increasing training set size for ESM2 and T5. The value continues to become statistically significant with epochs as the number of training data increases.
+    }
+    \label{spearman_correlation}
+  \end{center}
+\end{figure}
+\todo{add the spearman curves for all the other AA splits}
+\textbf{Restructured Latent Space.} As demonstrated by the authors of GOLLuM, an adaptive deep kernel GP undergoes a target-aware restructurization of the latent space as the training progresses. Figure \ref{fig:latent-evolution} shows the evolution of this implicit contrastive learning effect with iterations. The first panel shows the UMAP using the original 1280-dimensional ESM2-650M embeddings for both train and test splits of alpha amylase one-to-many split. The following plots in the figure represent the latent-space structure at iteration 1, 4, 7 and 10 by obtaining UMAPs on the 64-dimensional embeddings obtained from the finetuned ESM2-650M at the corresponding iteration. It can be observed how the training set space is getting structured according to the fitness value - higher fitness points are moving closer to each other and lower fitness sequences are also clustering together. Interestingly, this contrastive learning effect is not just restricted to the training split but is also translated to the test split as evident in the visualizations. This fact is further strengthened by the pairwise-distance distributions as shown in figure \ref{fig:latent-distances}. It shows the distribution of pairwise-distances for high-high, high-low and low-low pairs. This pairing is based on the statistical quantile cutoffs (Q20: low, Q80: high); the two sets of sequences are then put into all the possible pairs within the set and their distances are then visualized as a distribution. Under a contrastive-learning regime, we expect the distribution of high-high and low-low pairs to start becoming skewed more towards left, ensuring the pairwise distances are reducing for similar-valued sequences. Similarly, the distribution for high-low pairs should start to move more towards right.
+
+\textbf{Kernel Collapse.} After further investigation, the benefits of an implicit contrastive learning effect of GP optimized LLM becomes clearer. In a static embedding space, obtained from either one-hot encodings or a pre-trained language model, the GP kernel tends to approach 0 as the test sequences move far away from the training sequences. The kernel being utilized in this study is a 5/2 Matern kernel, commonly used in BO runs, which is mathematically a distance-based kernel which has an exponential inverse dependence on the distance between two datapoints. An increase in distance will lead to a decrease in kernel value. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/pairwise-distances-aa-1tom-esm2.pdf}
+    \caption{Distribution of pairwise-distances calculated on all the pairs from the set $(X_{train}, X_{test})$ of alpha-amylase one-to-many split using both one-hot encodings and finetuned embedding model. As it can be seen, the distances in one-hot encoding space is orders of magnitude more than those in the finetuned latent space. This large distance eventually leads to a collapsed kernel.}
+    \label{fig:train-test-distance}
+\end{figure}
+
+Owing to the nature of the FLIP2 splits, for both one-hot and static embedding scenarios, the test sequences were distant from train sequences in their corresponding latent spaces. This is further visualized through the pairwise-distance distribution curves for all the pairs $P \in$ $(X_{train}, X_{test})$ as shown in Figure \ref{fig:train-test-distance}.  Specifically for alpha amylase one-to-many split, the training sequences comprised of very similar looking structures (single-mutants) leading to a clustered region in the latent space. The test split, on the other hand, comprised of sequences with multiple mutations, that led to a large distance from the training region in uninformed representation spaces. As described earlier, this further resulted in a (Matern) kernel collapse which we further visualize in figure \ref{fig:kernel-viz}. For both heldout and test splits, the heatmap shows the difference between static and finetuned setups - a diverse heatmap means the kernel knows how to distinguish sequences from one another whereas a rather uniform heatmap would mean the surrogate is treating all the sequences equally. While the heldout heatmaps still preserve the distinction, the test heatmaps provide clear signal of kernel collapse while using static embeddings. As a consequence, the GP tends to provide the mean value of fitness scores in the training dataset as the prediction for the corresponding distant sequences. This was the case for all 488 test sequences in the split as expected. Hence, the spearman correlation turned out to be unquantifiable in both the above-mentioned scenarios.
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/kernel-heatmap-onehot.pdf}
+        \caption{One-hot encodings}
+        \label{fig:kernel-onehot}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/kernel-heatmap-static-esm2.pdf}
+        \caption{Static ESM2 embeddings}
+        \label{fig:kernel-static}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/kernel-heatmap-finetuned-esm2.pdf}
+        \caption{LoRA-finetuned ESM2 embeddings}
+        \label{fig:kernel-finetuned}
+    \end{subfigure}
+    \caption{Kernel visualizations for the alpha-amylase split. While one-hot and static embeddings exhibit \textit{Kernel Collapse} (dark regions indicating near-zero covariance), LoRA-finetuning successfully recovers meaningful covariance structure.}
+    \label{fig:kernel-viz}
+\end{figure*}
+
+\begin{figure*}[t]
+     \centering
+     \begin{subfigure}[b]{0.62\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/latent_evolution.pdf}
+         \caption{Evolution of the latent space with training}
+         \label{fig:latent-evolution}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.36\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/umap_latent_distances.pdf}
+         \caption{Pairwise-distances for high-high, high-low and low-low}
+         \label{fig:latent-distances}
+     \end{subfigure}
+     \caption{Objective-aware contrastive learning in the enzyme latent space}
+     \label{fig:umap_latent}
+\end{figure*}
+
+\textbf{How does joint-finetuning solve it?} The joint finetuning of GP with LLM celebrates an implicit contrastive effect where the latent space moves from being a rugged and unstructured space to a structured space with respect to the target values. This helps in bringing higher fitness sequences closer in the latent space and similarly, moving lower fitness sequences away. This approach results in a space where the test sequences, irrespective of being different in the original latent space, eventually get re-structured to move to the high-fitness region in the latent space. By visualizing the latent space for both original and finetuned ESM2 embeddings, it is evident how both the train and test splits restructure themselves according to the corresponding fitness scores \ref{fig:umap_latent}.
+
+Hence, we can conclude that \textbf{a joint finetuning framework can} \textbf{effectively address the "zero-kernel" problem in distant protein sequences} which is an essential requirement in real-life protein engineering setups.
+
+\subsection{Predictive and ranking capabilities}
+In addition to the latent space visualizations, we also checked how the predictive and ranking capabilities of heldout and test splits change for various setups being analyzed. We ran 5 seeds in each setup (random, one-hot encoding, static, and finetuned embeddings) to check how efficient the GP is in predicting the held-out set fitness, which is the portion of training dataset that was not used for training, and the test set. We report the \textit{Spearman $\rho$} values to analyze the predictions, comparing how the rank-correlation is preserved in each setup. From Table 1 \ref{tab:surrogate_predictive}, it is evident that a finetuned PLM achieved a reliable advantage over the existing methods. While the traditional approaches of one-hot and static embeddings suffered a kernel collapse (mentioned as KC), the correlation values of finetuned versions obtained statistically significant correlations over the test split. The values reported were obtained from a 10-iteration BO run and is representative of the general trend in the performance. 
+
+\begin{table}[t]
+\centering
+\caption{Surrogate predictive performance after 10 BO iterations with batch size of 96 on all the \textit{alpha-amylase} splits (mean $\pm$ std over 10 seeds). KC in the table stands for "Kernel Collapse" which means the model is uniformly predicting the global mean making ranking impossible.}
+\label{tab:surrogate_predictive}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{Spearman $\rho$ $\uparrow$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+\textbf{Model} & Train & Test \\
+\midrule
+One-hot + GP
+  & 0.32 $\pm$ 0.03& \textit{KC} \\
+GP + ESM2 (frozen)
+  & \textbf{0.41 $\pm$ 0.02}  & \textit{KC} \\
+GP + T5 (frozen)
+  & 0.31 $\pm$ 0.04 & \textit{KC} \\
+PLLM$\Phi$ + ESM2 (finetuned)
+  & 0.37 $\pm$ 0.01 & \textbf{0.46 $\pm$ 0.03}\\
+PLLM$\Phi$ + T5 (finetuned)
+  & 0.27 $\pm$ 0.04 & 0.26 $\pm$ 0.04\\
+\bottomrule
+\end{tabular}
+\end{table}
+\todo{maybe add trpB and ired dataset values here too}
+\subsection{Quantifying the contrastiveness of the latent space}
+\todo{finish this section}
+In addition to the visualization of latent space, we also calculated a "smoothness metric" \todo{okay dang the ratio did not help, think of something else now or skip this section?} which quantifies the extent of restructurization happening in the latent space and observed it during the training. The metric is a simple ratio of GP's lengthscale and the average pairwise distance that hints at how good the space is for optimization. 
+
+\subsection{Landscape complexity v/s BO performance}
+We performed a complexity analysis on the FLIP2 splits to quantify how difficult the underlying landscape is corresponding to that split. For this, we obtained the \textbf{Maximum Training Identity} (MTI) values of every split based on the Hamming distances; the lower the MTI values, the complex is the split. Almost all the splits showed a very high Hamming-based average MTI. As shown earlier, the stationary setups (one-hot encodings and static embeddings) suffered a kernel collapse on all these splits. This suggests that static PLM embeddings are extremely brittle to distribution shifts. Even in the 'Amylase/one-to-many' split, where test sequences maintain a mean MTI of 99.76\% (Appendix B.1) to the training set, the stationary Matérn kernel suffers from total collapse (Spearman = NaN). This suggests that for biological discovery, the 'trust region' of static PLMs is effectively non-existent for any sequence not seen during training. 
+
+\section{Discussion}
+In this work, we demonstrate how the use of pretrained knowledge of large-language models with gaussian processes in a bayesian optimization setup can improve discovery performance by $\langle\rangle$ compared to one-hot encodings in protein-engineering setups. This deviated from the fitness prediction superiority claims of one-hot encodings when compared to zero-shot PLM prediction scores, as mentioned in the FLIP2 paper. Furthermore, there was a clear signal towards generalizability efforts using GP-optimized LLMs as shown on the FLIP2 splits of various datasets. On the one hand, the one-hot encodings and static language model embeddings resulted in a shallow kernel without any predictive capabilities, whereas, on the other, the optimization-aware finetuning could learn an objective-aware representation in the test sequence space providing statistically significant correlation values. Since this kernel collapse was a consequence of "stationarity" of the kernel, a natural question would be to use non-stationary kernels. However, while non-stationary kernels such as the Gibbs kernel offer an alternative to these stationary Matérn kernels, they often require a priori knowledge of the landscape's non-stationarity \cite{paciorek2003nonstationary, williams2006gaussian}. In contrast, the joint fine-tuning approach discussed here treats the LLM as a learnable feature extractor, effectively discovering a task-specific non-stationary mapping that prevents kernel collapse in out-of-distribution regions.
+
+\section*{Impact Statement}
+This work addresses a fundamental yet overlooked bottleneck in machine learning-guided protein engineering: the failure of standard surrogate models to generalize when searching in novel sequence spaces. By identifying the mathematical phenomenon of "kernel collapse" in stationary Gaussian Processes and demonstrating that joint fine-tuning serves as an effective corrective, we provide a more robust framework for out-of-distribution protein discovery. 
+
+\bibliography{example_paper}
+\bibliographystyle{icml2026}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% APPENDIX
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newpage
+\appendix
+\onecolumn
+\section{Method}
+The method being utilized in this study is a deep-kernel Gaussian Process based Bayesian Optimization. 
+\subsection{Bayesian Optimization}
+Bayesian Optimization (BO) is a strategy for the global optimization of black-box functions that are expensive to evaluate. We consider the problem of finding a global maximizer:
+\begin{equation}
+    \mathbf{x}^* = \arg\max_{\mathbf{x} \in \mathcal{X}} f(\mathbf{x})
+\end{equation}
+where $\mathcal{X}$ is the search space (e.g., the space of enzyme sequences in the current study). BO consists of two primary components: a probabilistic surrogate model and an acquisition function.
+\subsubsection{Surrogate Model}
+A surrogate model is a probabilistic approximation of an expensive, complex or unknown "black-box" function. In the context of protein engineering, it acts as a mathematically "cheap" stand-in for the real-world fitness landscape. Instead of performing a costly wet-lab experiment for every possible sequence, a BO loop queries the surrogate to predict which sequences are most likely to yield high fitness or high information gain. 
+
+There are various choices of surrogate models: Random Forests, Bayesian Neural Networks and Gaussian Processes. We employ a Gaussian Process (GP) as the surrogate model, owing to its ability to provide uncertainty estimates, which defines a distribution over functions $f(\mathbf{x}) \sim \mathcal{GP}(m(\mathbf{x}), \kappa(\mathbf{x}, \mathbf{x}'))$. Given a set of $n$ observations $\mathcal{D}_n = \{(\mathbf{x}_i, y_i)\}_{i=1}^n$, the joint distribution of the observed values $\mathbf{y}$ and a function value at a new point $\mathbf{x}_*$ is:
+\begin{equation}
+    \begin{bmatrix} \mathbf{y} \\ f(\mathbf{x}_*) \end{bmatrix} \sim \mathcal{N} \left( \mathbf{0}, \begin{bmatrix} K + \sigma_n^2 I & \mathbf{k}_* \\ \mathbf{k}_*^\top & \kappa(\mathbf{x}_*, \mathbf{x}_*) \end{bmatrix} \right)
+\end{equation}
+The resulting posterior predictive distribution is Gaussian $P(f(\mathbf{x}_*)|\mathcal{D}_n) = \mathcal{N}(\mu_n(\mathbf{x}_*), \sigma_n^2(\mathbf{x}_*))$, with mean and variance given by:
+\begin{align}
+    \mu_n(\mathbf{x}_*) &= \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} \mathbf{y} \\
+    \sigma_n^2(\mathbf{x}_*) &= \kappa(\mathbf{x}_*, \mathbf{x}_*) - \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} \mathbf{k}_*
+\end{align}
+\subsubsection{Acquisition Function}
+Acquisition functions are special functions that help with calibrated sequential decision making in a BO loop. After obtaining the posterior of GP, the acquisition scores are calculated for every candidate sequence which provides a ranking over the candidate space. The top-ranked sequences are then chosen for the next round of expensive function evaluations. 
+
+\subsection{Gaussian Processes and choice of kernels}
+For protein engineering, the Matérn 5/2 is the most common choice as it provides a balance between smoothness and flexibility.
+\begin{equation}
+    k_{\text{Mat\'ern-5/2}}(\textbf{x, x'}) = \sigma_f^2 \left(1 + \frac{\sqrt{5}d}{\ell} + \frac{5d^2}{3\ell^2}\right) \exp\left(-\frac{\sqrt{5}d}{\ell}\right)
+\end{equation}
+where $d = \| \text{LLM}_\phi(x) - \text{LLM}_\phi(x') \|_2$ is the Euclidean distance in the latent space parameterized by the transformer $\phi$, and $\ell$ is the learned lengthscale.
+
+\subsubsection{Theory behind Kernel Collapse}
+Gaussian Process (GP) regression defines a distribution over functions $f(x) \sim \mathcal{GP}(m(x), \kappa(x, x'))$. In this work, we employed a constant mean function $m(x) = c$ and a Matérn $5/2$ kernel. Hence, the predictive distribution for a new test sequence $x_*$ is given by:
+\begin{align}
+    \mu_* &= m(x_*) + \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} (\mathbf{y} - \mathbf{m}) \\
+    \sigma^2_* &= \kappa(x_*, x_*) - \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} \mathbf{k}_*
+\end{align}
+where $\mathbf{k}_*$ is the cross-covariance vector between the test point and all training points.
+
+We define \textbf{Kernel Collapse (KC)} as the numerical state where the cross-covariance vector $\mathbf{k}_*$ approaches the zero vector $\mathbf{0}$. This occurs when the latent distance $d(x_*, x_{train})$ significantly exceeds the learned lengthscale $\ell$.
+
+\textbf{Numerical Origin of NaN Correlations.}
+When $\mathbf{k}_* \approx \mathbf{0}$, the predictive mean simplifies to the prior:
+\begin{equation}
+    \mu_* \approx m(x_*) + \mathbf{0}^\top (K + \sigma_n^2 I)^{-1} (\mathbf{y} - \mathbf{m}) = c
+\end{equation}
+As a result, the model predicts a constant value $c$ for every sequence in the test set. The Spearman Rank Correlation $\rho$ is defined as:
+\begin{equation}
+    \rho = \frac{\text{cov}(R(\mathbf{y}), R(\hat{\mathbf{y}}))}{\sigma_{R(y)} \sigma_{R(\hat{y})}}
+\end{equation}
+Because the rank vector $R(\hat{\mathbf{y}})$ for a constant prediction has a standard deviation $\sigma = 0$, the denominator vanishes, leading to the \texttt{NaN} values reported in Table 1 for static pLM baselines.
+
+\subsection{Implicit Contrastive Learning via MLL}
+Contrastive learning is a machine learning paradigm aimed at learning a latent representation where "similar" data points are pulled together and "dissimilar" points are pushed apart. In the current context of proteins, similarity is defined by the fitness values being optimized for instead of the evolutionary similarity among various sequences. Hence, unlike the contrastive objective utilized in standard language model pre-training, we instead make use of a \textbf{fitness-aware contrastive learning objective} by optimizing the Negative Marginal Log-Likelihood (NLL) with respect to the LLM parameters $\phi$:
+
+\begin{equation}
+    \mathcal{L} = \frac{1}{2} \mathbf{y}^\top K_y^{-1} \mathbf{y} + \frac{1}{2} \log |K_y| + \frac{n}{2} \log 2\pi
+\end{equation}
+The gradient $\frac{\partial \mathcal{L}}{\partial \phi}$ acts as an implicit contrastive force. Specifically, the quadratic term $\mathbf{y}^\top K_y^{-1} \mathbf{y}$ penalizes large distances between sequences with similar fitness labels, effectively "warping" the latent manifold to pull OOD test points back into the "trust region" (reach) of the kernel lengthscale.
+
+Figure \ref{fig:latent-evolution-esm2} shows how the latent space is getting "warped" while respecting the target values. The higher values (denoted by light colored-markers) are moving closer to each other and similarly, the darker values are moving closer together with every iteration. 
+
+\subsection{Implementation Details}
+
+\textbf{Static/frozen LM embedding.} 
+
+\textbf{PEFT adapted joint fine-tuning.}
+
+\section{Dataset Details}
+To evaluate the generalization capabilities of the evaluated deep-kernel method, we utilize the enzyme datasets from the FLIP2 benchmark \cite{miller2026flip2}. These landscapes are specifically designed to test model robustness under distribution shifts encountered in real-world protein engineering.
+
+\subsection{Dataset Descriptions and Splits}
+
+We focus our evaluation on four enzyme systems described in the benchmark: Alpha Amylase (Amylase), Tryptophan Synthase $\beta$-Subunit (TrpB), Nuclease B (NucB) and Imine Reductase (IRED). The sequence counts for each split are detailed in Table \ref{tab:flip2_stats}.
+
+\begin{table}[ht]
+\centering
+\caption{Sequence counts for FLIP2 enzyme splits.}
+\label{tab:flip2_stats}
+\begin{small}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Dataset} & \textbf{Split Strategy} & \textbf{$N_{train}$} & \textbf{$N_{val}$} & \textbf{$N_{test}$} & \textbf{$HTI_{test}$} \\
+\midrule
+\textbf{Amylase} & One-to-many (Number) & 412 & 77 & 3,217 & 0.9976 \\
+                 & Close-to-far (Position) & 1,426 & 356 & 1,924 & 0.9908\\
+                 & Far-to-close (Position) & 1,539 & 385 & 1,782 & 0.9931 \\
+                 & By-mutation (Mutation) & 2,403 & 601 & 702 & 0.9953 \\
+\midrule
+\textbf{TrpB}    & One-to-many (Number) & 201 & 50 & 160,000+ & 0.9935\\
+                 & Two-to-many (Number) & 8,000+ & 2,000+ & 160,000+ & 0.9959 \\
+                 & By-position (Position) & & & & 0.9955 \\
+\midrule
+\textbf{NucB}    & Two-to-many (Number) & 2,088 & 0 & 48,304 & 0.9709 \\
+\midrule
+\textbf{IRED}    & Two-to-many (Number) & 412 & 103 & 16,628 & 0.9901 \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{table}
+
+\paragraph{Split Definitions:} 
+\begin{itemize}
+    \item \textbf{Number (Extrapolation):} Models are trained on variants with few mutations (e.g., single or double mutants) and tested on higher-order mutants. This tests the ability to navigate "rugged" landscapes where epistatic effects dominate.
+    \item \textbf{Position (Spatial):} Mutations in the training set are spatially clustered (e.g., within 7.3\AA\ of the active site), while the test set contains mutations in distant, unperturbed regions. This is particularly challenging for static pLMs, often leading to the \textit{kernel collapse} discussed in Section \ref{sec:methods}.
+    \item \textbf{Mutation (Diversity):} Training and testing occur on disjoint sets of specific amino acid substitutions, testing for chemical generalization.
+\end{itemize}
+\section{Regret Plots}
+\todo{log regret plots for every split with all LLMs, one-hot and random baselines}
+\begin{figure}[H]
+  \vskip 0.2in
+  \begin{center}
+    \centerline{\includegraphics[width=\columnwidth]{figures/log_regret_combined.pdf}}
+    \caption{
+      Log regret plots for all FLIP2 enzyme splits using various BO setups. The dashed lines represent the static embeddings and the bold lines represent the finetuned versions.
+    }
+    \label{spearman_correlation}
+  \end{center}
+\end{figure}
+\section{BO performance on every FLIP2 enzyme split}
+\todo{add top 5\% coverage at epoch 3 bar plots for every split here}
+\begin{figure*}[t] % Use figure* for double-column width
+    \centering
+    % --- Row 1 ---
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/top5_coverage_epoch3_alpha-amylase_one_to_many.pdf}
+        \caption{Alpha-Amylase (1toM)}
+        \label{fig:amylase_1tom}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/top5_coverage_epoch3_alpha-amylase_close_to_far.pdf}
+        \caption{Alpha-Amylase (C2F)}
+        \label{fig:amylase_c2f}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/top5_coverage_epoch3_alpha-amylase_far_to_close.pdf}
+        \caption{Alpha-Amylase (F2C)}
+        \label{fig:amylase_f2c}
+    \end{subfigure}
+
+    \vspace{1em} % Add vertical space between rows
+
+    % --- Row 2 ---
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/top5_coverage_epoch3_alpha-amylase_by_mutation.pdf}
+        \caption{Alpha-Amylase (Mut)}
+        \label{fig:amylase_mut}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/top5_coverage_epoch3_ired_two_to_many.pdf}
+        \caption{IRED (2toM)}
+        \label{fig:ired_2tom}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/top5_coverage_epoch3_nucB_two_to_many.pdf}
+        \caption{NucB (2toM)}
+        \label{fig:nucb_2tom}
+    \end{subfigure}
+
+    \vspace{1em}
+
+    % --- Row 3 ---
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/top5_coverage_epoch3_alpha-amylase_close_to_far.pdf}
+        \caption{TrpB (1toM)}
+        \label{fig:split7}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/top5_coverage_epoch3_trpB_two_to_many.pdf}
+        \caption{TrpB (2toM)}
+        \label{fig:split8}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/top5_coverage_epoch3_alpha-amylase_by_mutation.pdf}
+        \caption{TrpB (by Position)}
+        \label{fig:split9}
+    \end{subfigure}
+
+    \caption{Comprehensive comparison of one-hot, frozen and deep-kernel based methods across 9 FLIP2 splits. Each panel shows the top-5\% coverage obtained by various setups on all the FLIP2 splits after 3 epochs.}
+    \label{fig:9_subplots_main}
+\end{figure*}
+\section{Performance with different PLMs}
+\todo{add top 5\% coverage plots vs iteration here for every split - should include results from all the LLMs}
+\section{Other GOLLuM architectures}
+\todo{add PLLM and LLMphi results; still need to decide what to add}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\end{document}

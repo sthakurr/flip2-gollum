@@ -9,7 +9,7 @@
 #SBATCH --job-name=flip2-test
 #SBATCH --output=logs/%A_%a_%x.out
 #SBATCH --error=logs/%A_%a_%x.err
-#SBATCH --time=12:00:00
+#SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -38,7 +38,7 @@ MODELS=(
 )
 
 MODEL_CONFIGS=(
-    "configs/flip2_pllmphi.yaml"   # ESMC
+    "configs/flip2_hf.yaml"
     "configs/flip2_hf.yaml"        # ESM2
     "configs/flip2_hf.yaml"        # ProtT5
     "configs/flip2_hf.yaml"        # t5-base
@@ -52,7 +52,7 @@ set -euo pipefail
 mkdir -p logs
 
 echo "========================================"
-echo "Array task : $SLURM_ARRAY_JOB_ID / $SLURM_ARRAY_TASK_ID"
+# echo "Array task : $SLURM_ARRAY_JOB_ID / $SLURM_ARRAY_TASK_ID"
 echo "Model      : $MODEL"
 echo "Dataset    : $DATASET  ($DATA_PATH)"
 echo "Seed       : $SEED"
@@ -71,10 +71,10 @@ export HF_DATASETS_OFFLINE=1
 export HF_HOME="/capstor/store/cscs/swissai/a131/ssaumya/.cache/huggingface"
 
 EMBEDDING_SIZES=(
+    "t5-base:768"
     "EvolutionaryScale/esmc-600m-2024-12:1152"
     "facebook/esm2_t33_650M_UR50D:1280"
     "Rostlab/prot_t5_xl_uniref50:1024"
-    "t5-base:768"
 )
 
 TMP_CONFIG=$(mktemp /tmp/gollum_flip2_test_XXXXXX.yaml)
