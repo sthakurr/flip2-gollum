@@ -20,12 +20,17 @@ def get_target_layers(model, proportion=0.25, from_top=True):
             if len(parts) > 1:
                 num = parts[1].split(".")[0]
                 return int(num) if num.isdigit() else None
+        elif "blocks." in name:  # ESMC style (transformer.blocks.N)
+            parts = name.split("blocks.")
+            if len(parts) > 1:
+                num = parts[1].split(".")[0]
+                return int(num) if num.isdigit() else None
         elif "layers." in name:  # BERT style
             parts = name.split("layers.")
             if len(parts) > 1:
                 num = parts[1].split(".")[0]
                 return int(num) if num.isdigit() else None
-        elif "layer." in name:  # ESM style (encoder.layer.X)
+        elif "layer." in name:  # ESM2 style (encoder.layer.X)
             parts = name.split("layer.")
             if len(parts) > 1:
                 num = parts[1].split(".")[0]

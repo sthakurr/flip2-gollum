@@ -239,7 +239,10 @@ def get_huggingface_embeddings(
         with torch.inference_mode(), torch.autocast(
             device_type="cuda", dtype=torch.bfloat16, enabled=autocast_enabled
         ):
-            outputs = model(**encoded_input)
+            if getattr(model.config, "is_encoder_decoder", False):
+                outputs = model.encoder(**encoded_input)
+            else:
+                outputs = model(**encoded_input)
             pooled = pooling_functions[pooling_method](
                 outputs.last_hidden_state, encoded_input["attention_mask"]
             )

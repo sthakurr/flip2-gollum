@@ -909,3 +909,5 @@ scratch/
 tests/
 
 embeddings_cache/
+
+jobs/
