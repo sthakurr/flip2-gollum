@@ -329,6 +329,15 @@ def run_phase2(config, dm, bo, n_iters, epoch_offset=0):
     test_stats = calculate_data_stats(dm.test_x, dm.test_y)
     f_max = dm.test_y.max().item()
 
+    # Top-q% coverage denominators: how many test points fall in each top band.
+    # coverage_top{p} = (# acquired in band) / (# test points in band).
+    test_y_flat = dm.test_y.squeeze()
+    coverage_bands = {}  # label (e.g. 5) -> (threshold, band_size)
+    for q, label in [(0.99, 1), (0.95, 5), (0.90, 10)]:
+        thr = test_stats[f"target_q{int(q * 100)}"]
+        band_size = int((test_y_flat >= thr).sum().item())
+        coverage_bands[label] = (thr, max(band_size, 1))
+
     train_x = dm.train_x.clone().to(device)
     train_y = dm.train_y.clone().to(device)
     design_x = dm.test_x.clone().to(device)
@@ -375,6 +384,14 @@ def run_phase2(config, dm, bo, n_iters, epoch_offset=0):
             }
         )
         log_bo_metrics(test_stats, acquired_y, epoch=epoch, prefix="phase2/")
+
+        # Normalized top-q% coverage: fraction of the test top band acquired so far.
+        acquired_flat = acquired_y.squeeze()
+        for label, (thr, band_size) in coverage_bands.items():
+            n_hit = int((acquired_flat >= thr.to(acquired_flat.device)).sum().item())
+            wandb.log(
+                {f"phase2/coverage_top{label}": n_hit / band_size, "epoch": epoch}
+            )
 
     final_best = train_y[n_seed:].max().item()
     print(

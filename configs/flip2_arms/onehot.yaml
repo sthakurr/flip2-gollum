@@ -44,7 +44,7 @@ surrogate_model:
     initial_outputscale_val: 1.0
     initial_lengthscale_val: 3.0
 name: onehot                       # W&B run name base
-mode: both                         # both = collect 96+3x96 via BO over train, then eval on test
+mode: full                         # full = collect batch_size+(phase1_itersxbatch_size) via BO over train
 phase1_iters: 3
 phase2_iters: 5
 seed: 0
