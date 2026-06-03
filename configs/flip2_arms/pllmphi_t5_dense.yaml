@@ -1,0 +1,95 @@
+# DeepGP arm: t5-base fine-tuned end-to-end (LoRA) with a projection layer, GP on top.
+# Non-protein-specific text-encoder baseline for the DeepGP setup; mirrors
+# deepgp_esm2_dense.yaml. representation is `get_tokens` (the LLM is fine-tuned),
+# so normalize_input stays `original` and reduce_dim is null (the 64-d projection
+# layer does the dimensionality reduction).
+data:
+  class_path: gollum.data.module.BaseDataModule
+  init_args:
+    data_path: data/flip2/alpha-amylase/one_to_many.csv
+    input_column: sequence
+    target_column: target
+    maximize: true
+    exclude_top: true
+    respect_split: true
+    split_column: set
+    normalize_input: original
+    reduce_dim: null
+    featurizer:
+      class_path: gollum.data.module.Featurizer
+      init_args:
+        representation: get_tokens
+        model_name: t5-base
+        pooling_method: average
+    initializer:
+      class_path: gollum.initialization.initializers.BOInitializer
+      init_args:
+        method: true_random
+        n_clusters: 96
+bo:
+  class_path: gollum.bo.optimizer.BotorchOptimizer
+  init_args:
+    batch_strategy: "kriging"
+    batch_size: 96
+acquisition:
+  class_path: botorch.acquisition.analytic.ExpectedImprovement
+  init_args:
+    maximize: True
+surrogate_model:
+  class_path: gollum.surrogate_models.gp.DeepGP
+  init_args:
+    likelihood:
+      class_path: gpytorch.likelihoods.GaussianLikelihood
+      init_args:
+        noise_prior: null
+        noise_constraint: null
+        batch_shape:
+          class_path: torch.Size
+    covar_module:
+      class_path: gpytorch.kernels.ScaleKernel
+      init_args:
+        base_kernel:
+          class_path: gpytorch.kernels.MaternKernel
+          init_args:
+            nu: 2.5
+            ard_num_dims: null
+            batch_shape: null
+            active_dims: null
+            lengthscale_prior: null
+            lengthscale_constraint: null
+        outputscale_prior: null
+        outputscale_constraint: null
+        ard_num_dims: null
+        batch_shape: null
+        active_dims: null
+        lengthscale_prior: null
+        lengthscale_constraint: null
+    mean_module:
+      class_path: gpytorch.means.ConstantMean
+    standardize: true
+    normalize: false
+    initial_noise_val: 1.0
+    noise_constraint: 1.0e-04
+    initial_outputscale_val: 1.0
+    initial_lengthscale_val: 1.0
+    gp_lr: 0.2
+    ft_lr: 0.002
+    scale_embeddings: true
+    train_mll_additionally: false
+    finetuning_model:
+      class_path: gollum.featurization.deep.LLMFeaturizer
+      init_args:
+        input_dim: 768             # t5-base hidden size (auto-checked by validate_configuration)
+        projection_dim: 64
+        from_top: true
+        target_ratio: 0.25
+        model_name: t5-base
+        pooling_method: average
+        normalize_embeddings: false
+        lora_dropout: 0.2
+        trainable: true
+name: pllmphi_t5_dense
+mode: both
+phase1_iters: 3
+phase2_iters: 5
+seed: 0

@@ -243,10 +243,11 @@ def run_gate(config, dm, bo):
     return metrics
 
 
-def run_bo(config, dm, bo, data_stats):
-    """Phase-2 BO loop: iteratively acquire candidates from the held-out design
-    space (the test split when respect_split is set)."""
-    for i in tqdm(range(config["n_iters"]), colour="blue"):
+def run_bo(config, dm, bo, data_stats, n_iters=None):
+    """Phase-1 BO loop: iteratively acquire candidates from the held-out design
+    space (the remaining train pool when respect_split is set)."""
+    n_iters = n_iters if n_iters is not None else config["n_iters"]
+    for i in tqdm(range(n_iters), colour="blue"):
         train_x = dm.train_x.clone().to("cuda")
         train_y = dm.train_y.clone().to("cuda")
         design_space = dm.heldout_x.clone().to("cuda")
@@ -309,7 +310,77 @@ def run_bo(config, dm, bo, data_stats):
         total_indices = len(dm.train_indexes) + len(dm.heldout_indices) + n_test
         assert total_indices == len(dm.x), "Mismatch in the total number of indices"
 
-    log_bo_metrics(data_stats, dm.train_y, epoch=config["n_iters"])
+    log_bo_metrics(data_stats, dm.train_y, epoch=n_iters)
+
+
+def run_phase2(config, dm, bo, n_iters, epoch_offset=0):
+    """Phase-2 BO over the TEST split, seeded by the Phase-1-collected train
+    points (already accumulated in dm.train_*). The GP is re-fit each iteration
+    on the growing train set (Phase-1 seed + Phase-2 acquisitions). Logs
+    best-found and simple regret against the known test optimum.
+
+    Operates purely on tensors (it does not touch dm's dataframe bookkeeping),
+    since the Phase-2 design space is the held-aside test set.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if dm.test_x is None:
+        raise ValueError("Phase 2 needs a held-aside test set; set respect_split: true.")
+
+    test_stats = calculate_data_stats(dm.test_x, dm.test_y)
+    f_max = dm.test_y.max().item()
+
+    train_x = dm.train_x.clone().to(device)
+    train_y = dm.train_y.clone().to(device)
+    design_x = dm.test_x.clone().to(device)
+    design_y = dm.test_y.clone().to(device)
+
+    n_seed = train_y.shape[0]
+    print(
+        f"Phase 2: seeded with {n_seed} train points, discovering over "
+        f"{design_x.shape[0]} test candidates for {n_iters} iters (test max {f_max:.4f})"
+    )
+
+    for i in tqdm(range(n_iters), colour="green"):
+        if design_x.shape[0] == 0:
+            print("Phase 2: test design space exhausted; stopping early.")
+            break
+
+        x_next = bo.suggest_next_experiments(train_x, train_y, design_x)
+        x_next = torch.stack(x_next)  # (batch, 1, D)
+
+        matches = (design_x.unsqueeze(0) == x_next).all(dim=-1)  # (batch, N)
+        indices = torch.unique(matches.nonzero(as_tuple=True)[1])
+
+        new_x = design_x[indices]
+        new_y = design_y[indices]
+
+        train_x = torch.cat([train_x, new_x], dim=0)
+        train_y = torch.cat([train_y, new_y], dim=0)
+        # Device-safe row removal (indices live on the same device as design_x).
+        keep = torch.ones(design_x.shape[0], dtype=torch.bool, device=design_x.device)
+        keep[indices] = False
+        design_x = design_x[keep]
+        design_y = design_y[keep]
+
+        acquired_y = train_y[n_seed:]
+        best = acquired_y.max().item()
+        epoch = epoch_offset + i
+        wandb.log(
+            {
+                "phase2/best_test": best,
+                "phase2/simple_regret": f_max - best,
+                "phase2/n_acquired": int(acquired_y.shape[0]),
+                "phase2/evaluated_suggestions": wandb.Histogram(new_y.cpu()),
+                "epoch": epoch,
+            }
+        )
+        log_bo_metrics(test_stats, acquired_y, epoch=epoch, prefix="phase2/")
+
+    final_best = train_y[n_seed:].max().item()
+    print(
+        f"Phase 2 done: best test value {final_best:.4f} "
+        f"(test max {f_max:.4f}, final simple regret {f_max - final_best:.4f})"
+    )
 
 
 def make_run_name(config, mode):
@@ -355,12 +426,26 @@ def train(config):
         data_stats = calculate_data_stats(dm.x, dm.y)
         log_data_stats(data_stats)
 
-        # For `both`: run Phase-1 BO collection over the train pool first, then
-        # evaluate the resulting GP on the held-aside test split.
-        if mode in ("bo", "both"):
-            run_bo(config, dm, bo, data_stats)
-        if mode in ("gate", "both"):
+        # Phase iteration counts: `full` uses separate phase1/phase2 budgets;
+        # other modes fall back to n_iters.
+        phase1_iters = config.get("phase1_iters") or config.get("n_iters", 3)
+        phase2_iters = config.get("phase2_iters") or config.get("n_iters", 3)
+
+        if mode == "full":
+            # Phase 1: BO collection over the train pool. Then report the gate
+            # (test Spearman/NLPD/top-k of the Phase-1-trained GP — the seed's
+            # transfer quality) before Phase 2: BO discovery over the test split
+            # seeded by the collected points.
+            run_bo(config, dm, bo, data_stats, n_iters=phase1_iters)
             run_gate(config, dm, bo)
+            run_phase2(config, dm, bo, phase2_iters, epoch_offset=phase1_iters + 1)
+        else:
+            # For `both`: Phase-1 BO collection over train, then gate-evaluate
+            # the resulting GP on the held-aside test split.
+            if mode in ("bo", "both"):
+                run_bo(config, dm, bo, data_stats, n_iters=phase1_iters)
+            if mode in ("gate", "both"):
+                run_gate(config, dm, bo)
 
         # Save finetuned model if using DeepGP
         if config["surrogate_model"]["class_path"] == "gollum.surrogate_models.gp.DeepGP":
@@ -417,10 +502,17 @@ def main():
 
     parser.add_argument("--n_iters", type=int, help="How many iterations to run")
     parser.add_argument(
+        "--phase1_iters", type=int, help="Phase-1 (train) BO iterations (full mode)"
+    )
+    parser.add_argument(
+        "--phase2_iters", type=int, help="Phase-2 (test) BO iterations (full mode)"
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         default="bo",
-        help="gate (fit on train, rank test), bo (Phase-2 loop), or both",
+        help="gate (fit train, rank test), bo (Phase-1 collect), both (bo+gate), "
+        "or full (Phase-1 train BO -> Phase-2 test BO)",
     )
     parser.add_argument("--group", type=str, help="Wandb group runs")
     parser.add_argument("--name", type=str, default=None, help="Wandb run name base")

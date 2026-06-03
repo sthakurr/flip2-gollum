@@ -45,38 +45,49 @@ def log_data_stats(data_metrics):
         wandb.summary[key] = value.item() if torch.is_tensor(value) else value
 
 
-def log_bo_metrics(data_stats, train_y, epoch=0):
+def log_bo_metrics(data_stats, train_y, epoch=0, prefix=""):
     """
     Log bo-specific metrics (quantiles, top counts and best so far) to WandB.
+
+    ``prefix`` namespaces the keys (e.g. "phase2/") so Phase-1 and Phase-2 BO
+    don't overwrite each other's curves.
     """
-    log_best_so_far(train_y, epoch)
-    log_top_n_counts(data_stats, train_y, epoch)
-    log_quantile_counts(data_stats, train_y, epoch)
+    log_best_so_far(train_y, epoch, prefix=prefix)
+    log_top_n_counts(data_stats, train_y, epoch, prefix=prefix)
+    log_quantile_counts(data_stats, train_y, epoch, prefix=prefix)
 
 
-def log_best_so_far(train_y, epoch=0):
+def log_best_so_far(train_y, epoch=0, prefix=""):
     """
     Log the best-so-far value to WandB.
     """
     best_so_far = torch.max(train_y).item()
-    wandb.log({"train/best_so_far": best_so_far, "epoch": epoch})
+    wandb.log({f"{prefix}train/best_so_far": best_so_far, "epoch": epoch})
 
 
-def log_top_n_counts(data_stats, train_y, epoch=0):
+def _to_device(threshold, train_y):
+    """Match the threshold's device to train_y (data_stats may be built from a
+    different device than the y being scored, e.g. CPU test stats vs CUDA y)."""
+    if torch.is_tensor(threshold):
+        return threshold.to(train_y.device)
+    return threshold
+
+
+def log_top_n_counts(data_stats, train_y, epoch=0, prefix=""):
     """
     Log the count of top N values to WandB.
     """
     for n in [1, 3, 5, 10]:
-        threshold = data_stats[f"top_{n}"]
+        threshold = _to_device(data_stats[f"top_{n}"], train_y)
         count = (train_y >= threshold).sum().item()
-        wandb.log({f"top_{n}_count": count, "epoch": epoch})
+        wandb.log({f"{prefix}top_{n}_count": count, "epoch": epoch})
 
 
-def log_quantile_counts(data_stats, train_y, epoch=0):
+def log_quantile_counts(data_stats, train_y, epoch=0, prefix=""):
     """
     Log the count of quantiles to WandB.
     """
     for q in [0.75, 0.9, 0.95, 0.99]:
-        threshold = data_stats[f"target_q{int(q * 100)}"]
+        threshold = _to_device(data_stats[f"target_q{int(q * 100)}"], train_y)
         count = (train_y >= threshold).sum().item()
-        wandb.log({f"quantile_{int(q * 100)}_count": count, "epoch": epoch})
+        wandb.log({f"{prefix}quantile_{int(q * 100)}_count": count, "epoch": epoch})

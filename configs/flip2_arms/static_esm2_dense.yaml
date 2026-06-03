@@ -44,7 +44,8 @@ surrogate_model:
     noise_constraint: 1.0e-04
     initial_outputscale_val: 1.0
     initial_lengthscale_val: 1.0
-name: esm2_dense
+name: static_esm2_dense
 mode: gate
-n_iters: 3
+phase1_iters: 3
+phase2_iters: 5
 seed: 0

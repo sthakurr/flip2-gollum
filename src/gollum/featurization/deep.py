@@ -81,6 +81,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
         modules_to_save: Optional[List[str]] = ["head"],
         target_ratio: float = 0.25,
         from_top: bool = True,
+        gradient_checkpointing: bool = True,
     ):
         super().__init__(input_dim=input_dim, projection_dim=projection_dim)
         print(model_name, "for LLM")
@@ -102,6 +103,20 @@ class LLMFeaturizer(BaseNNFeaturizer):
                     modules_to_save=modules_to_save,
                 ),
             )
+            # Gradient checkpointing: recompute LLM activations during backward
+            # instead of storing them. The joint DeepGP fit backprops through the
+            # LLM for ALL train points at once (the GP needs the full covariance),
+            # so activation memory scales with the train-set size and OOMs on a
+            # large LLM. enable_input_require_grads is required for checkpointing
+            # to propagate gradients through a LoRA-wrapped frozen backbone.
+            if gradient_checkpointing:
+                self.llm.enable_input_require_grads()
+                try:
+                    self.llm.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={"use_reentrant": False}
+                    )
+                except TypeError:  # older transformers without the kwargs arg
+                    self.llm.gradient_checkpointing_enable()
             self.llm.print_trainable_parameters()
         else:
             self.llm.requires_grad_(False)

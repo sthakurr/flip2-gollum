@@ -1,5 +1,7 @@
-# Representation-comparison arm: ESM2 embeddings reduced to effective dimension
-# via PCA (fit on train rows), so the dimension-scaled prior uses an honest d.
+# Representation-comparison arm: sparse-autoencoder features over ESM-C, with a
+# sparse-ARD GP (SAASBO-lite). Most experimental arm.
+# Requires both the `esm` package AND trained SAE weights at sae_weights_path;
+# errors clearly if either is missing so the sweep can skip it.
 data:
   class_path: gollum.data.module.BaseDataModule
   init_args:
@@ -11,13 +13,14 @@ data:
     respect_split: true
     split_column: set
     normalize_input: standard_scaling_per_dim
-    reduce_dim: 128               # PCA components (int) — caps effective dim
+    reduce_dim: null               # no PCA for this arm (guard against config-merge leaks)
     featurizer:
       class_path: gollum.data.module.Featurizer
       init_args:
-        representation: get_huggingface_embeddings
-        model_name: facebook/esm2_t33_650M_UR50D
+        representation: get_esmc_sae_features
+        model_name: esmc_300m
         pooling_method: average
+        sae_weights_path: null      # set to trained SAE weights to enable this arm
     initializer:
       class_path: gollum.initialization.initializers.BOInitializer
       init_args:
@@ -33,10 +36,9 @@ acquisition:
   init_args:
     maximize: True
 surrogate_model:
-  class_path: gollum.surrogate_models.gp.GP
+  class_path: gollum.surrogate_models.gp.SparseArdGP
   init_args:
     likelihood: null
-    covar_module: null
     mean_module:
       class_path: gpytorch.means.ConstantMean
     standardize: true
@@ -45,7 +47,11 @@ surrogate_model:
     noise_constraint: 1.0e-04
     initial_outputscale_val: 1.0
     initial_lengthscale_val: 1.0
-name: esm2_pca
+    nu: 2.5
+    lengthscale_prior_concentration: 3.0
+    lengthscale_prior_rate: 6.0
+name: static_esmc_sae
 mode: gate
-n_iters: 3
+phase1_iters: 3
+phase2_iters: 5 
 seed: 0

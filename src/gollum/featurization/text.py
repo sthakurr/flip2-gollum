@@ -323,24 +323,54 @@ def _cache_path(tag, texts):
     return os.path.join(EMBEDDING_CACHE_DIR, f"{safe_tag}_{h}.npy")
 
 
+def _esmc_pool(hidden, attn, pooling_method):
+    """Pool ESM-C per-residue hidden states ``(B, L, D)`` to ``(B, D)``.
+
+    ``attn`` is the ``(B, L)`` attention mask. For average pooling we mean over
+    real residues, excluding padding *and* the BOS (pos 0) / EOS (last real
+    token) special tokens — matching the single-sequence ``[1:-1]`` behavior.
+    """
+    if pooling_method == "cls":
+        return hidden[:, 0, :]
+    if pooling_method != "average":
+        raise ValueError(f"Unsupported pooling_method: {pooling_method}")
+
+    mask = attn.clone().bool()
+    mask[:, 0] = False  # BOS
+    lengths = attn.sum(dim=1)  # number of real tokens per sequence
+    eos_idx = (lengths - 1).clamp(min=0)
+    mask[torch.arange(mask.shape[0], device=mask.device), eos_idx] = False  # EOS
+    mask = mask.unsqueeze(-1).to(hidden.dtype)
+    summed = (hidden * mask).sum(dim=1)
+    counts = mask.sum(dim=1).clamp_min(1.0)
+    return summed / counts
+
+
 def get_esmc_embeddings(
     texts,
     model_name="esmc_300m",
     pooling_method="average",
-    batch_size=8,
+    batch_size=16,
     device="cuda" if torch.cuda.is_available() else "cpu",
     normalize_embeddings=False,
+    use_cache=True,
 ):
     """Mean-pooled ESM-C (ESM Cambrian) per-sequence embeddings.
 
-    Uses the EvolutionaryScale ``esm`` SDK. Results are cached to disk keyed by
-    the model name + sequence set, since ESM-C is expensive. Raises a clear
-    ImportError if the ``esm`` package is not installed (so the sweep can skip
-    the ESM-C arms rather than crash cryptically).
+    Uses the EvolutionaryScale ``esm`` SDK. Batches the forward pass (tokenize →
+    single batched model forward → masked mean-pool) under bf16 autocast for
+    speed; falls back to the per-sequence SDK API if the batched/low-level API
+    isn't available in the installed ``esm`` version. Results are cached to disk
+    keyed by model + pooling + normalize + sequence set, since ESM-C is expensive.
+    Raises a clear ImportError if ``esm`` is missing so the sweep can skip ESM-C.
     """
     texts = list(texts)
-    cache = _cache_path(f"esmc_{model_name}_{pooling_method}", texts)
-    if os.path.exists(cache):
+    cache = (
+        _cache_path(f"esmc_{model_name}_{pooling_method}_norm{int(normalize_embeddings)}", texts)
+        if use_cache
+        else None
+    )
+    if cache and os.path.exists(cache):
         print(f"loading cached ESM-C embeddings from {cache}")
         return np.load(cache)
 
@@ -357,31 +387,66 @@ def get_esmc_embeddings(
     print(f"featurizing with ESM-C ({model_name})")
     client = ESMC.from_pretrained(model_name).to(device)
     client.eval()
+    autocast_enabled = device == "cuda" or (
+        hasattr(device, "type") and device.type == "cuda"
+    )
 
-    embeddings = []
-    for seq in tqdm(texts, desc=f"Processing with {model_name}"):
-        protein = ESMProtein(sequence=seq)
-        with torch.no_grad():
-            tensor = client.encode(protein)
-            out = client.logits(
-                tensor, LogitsConfig(sequence=True, return_embeddings=True)
+    def _normalize_and_np(pooled):
+        if normalize_embeddings:
+            pooled = F.normalize(pooled, p=2, dim=-1)
+        return pooled.float().cpu().numpy()
+
+    def _batched():
+        out_list = []
+        for i in tqdm(
+            range(0, len(texts), batch_size), desc=f"Processing with {model_name}"
+        ):
+            batch = texts[i : i + batch_size]
+            tok = client.tokenizer(
+                batch, padding=True, truncation=True, return_tensors="pt"
             )
-            # out.embeddings: (1, L+special_tokens, d); drop BOS/EOS, mean-pool.
-            residues = out.embeddings[0, 1:-1, :]
-            if pooling_method == "average":
-                pooled = residues.mean(dim=0)
-            elif pooling_method == "cls":
-                pooled = out.embeddings[0, 0, :]
-            else:
-                raise ValueError(f"Unsupported pooling_method: {pooling_method}")
-            if normalize_embeddings:
-                pooled = F.normalize(pooled, p=2, dim=-1)
-            embeddings.append(pooled.cpu().numpy())
-        torch.cuda.empty_cache()
+            input_ids = tok["input_ids"].to(device)
+            attn = tok["attention_mask"].to(device)
+            with torch.inference_mode(), torch.autocast(
+                device_type="cuda", dtype=torch.bfloat16, enabled=autocast_enabled
+            ):
+                model_out = client(sequence_tokens=input_ids)
+                pooled = _esmc_pool(model_out.embeddings, attn, pooling_method)
+            out_list.append(_normalize_and_np(pooled))
+        return np.concatenate(out_list, axis=0)
 
-    arr = np.stack(embeddings, axis=0)
-    np.save(cache, arr)
-    return arr
+    def _single():
+        # Fallback: per-sequence SDK API (slow, no batching).
+        out_list = []
+        for seq in tqdm(texts, desc=f"Processing with {model_name} (single)"):
+            protein = ESMProtein(sequence=seq)
+            with torch.inference_mode():
+                tensor = client.encode(protein)
+                out = client.logits(
+                    tensor, LogitsConfig(sequence=True, return_embeddings=True)
+                )
+                emb = out.embeddings  # (1, L+special, d)
+                if pooling_method == "average":
+                    pooled = emb[0, 1:-1, :].mean(dim=0, keepdim=True)
+                elif pooling_method == "cls":
+                    pooled = emb[0, 0:1, :]
+                else:
+                    raise ValueError(f"Unsupported pooling_method: {pooling_method}")
+            out_list.append(_normalize_and_np(pooled))
+        return np.concatenate(out_list, axis=0)
+
+    try:
+        embeddings = _batched()
+    except Exception as e:
+        print(
+            f"ESM-C batched forward failed ({type(e).__name__}: {e}); "
+            "falling back to slower per-sequence featurization."
+        )
+        embeddings = _single()
+
+    if cache:
+        np.save(cache, embeddings)
+    return embeddings
 
 
 def get_esmc_sae_features(

@@ -1,4 +1,5 @@
-# one-hot encoding baseline
+# Representation-comparison arm: dense t5-base embeddings (mean-pooled, 768-d).
+# Non-protein-specific text encoder, useful as a baseline against the protein LMs.
 data:
   class_path: gollum.data.module.BaseDataModule
   init_args:
@@ -7,20 +8,21 @@ data:
     target_column: target
     maximize: true
     exclude_top: true
-    respect_split: true          # honor the FLIP train/test `set` column
+    respect_split: true
     split_column: set
     normalize_input: standard_scaling_per_dim
     reduce_dim: null               # no PCA for this arm (guard against config-merge leaks)
     featurizer:
       class_path: gollum.data.module.Featurizer
       init_args:
-        representation: onehot     # flatten one-hot, drop zero-variance columns
-        model_name: onehot         # label only (ignored by the featurizer)
+        representation: get_huggingface_embeddings
+        model_name: t5-base
+        pooling_method: average
     initializer:
       class_path: gollum.initialization.initializers.BOInitializer
       init_args:
         method: true_random
-        n_clusters: 96            # Phase-1 budget (~3 x 96)
+        n_clusters: 96
 bo:
   class_path: gollum.bo.optimizer.BotorchOptimizer
   init_args:
@@ -34,7 +36,7 @@ surrogate_model:
   class_path: gollum.surrogate_models.gp.GP
   init_args:
     likelihood: null
-    covar_module: null            # BoTorch default (dimension-scaled prior)
+    covar_module: null
     mean_module:
       class_path: gpytorch.means.ConstantMean
     standardize: true
@@ -42,9 +44,9 @@ surrogate_model:
     initial_noise_val: 1.0
     noise_constraint: 1.0e-04
     initial_outputscale_val: 1.0
-    initial_lengthscale_val: 3.0
-name: onehot                       # W&B run name base
-mode: both                         # both = collect 96+3x96 via BO over train, then eval on test
+    initial_lengthscale_val: 1.0
+name: static_t5_dense
+mode: gate
 phase1_iters: 3
 phase2_iters: 5
 seed: 0

@@ -120,28 +120,24 @@ class BotorchOptimizer:
         return best_point, best_indices, acq_values
 
     def optimize_acquisition_function_batch(self, train_x, train_y, design_space):
-
-        if self.batch_strategy in ["kriging", "cl_min", "cl_mean", "cl_max"]:
-            candidates = []
-            candidate_indices = []
-            candidate_acq_values = []
-
-            for i in range(self.batch_size):
-                best_point, best_indices, acq_values = (
-                    self.optimize_acquisition_function(design_space)
-                )
-                y_lie = self.lie_to_me(
-                    best_point, train_y, strategy=self.batch_strategy
-                )
-                train_x = torch.cat([train_x, best_point])
-                train_y = torch.cat([train_y, y_lie])
-
-                design_space = torch_delete_rows(design_space, best_indices)
-
-                candidates.append(best_point)
-                candidate_indices.append(best_indices.item())
-                candidate_acq_values.append(acq_values)
-
+        # The previous Kriging/Constant-Liar loop never re-conditioned the
+        # surrogate or acquisition function on its fantasy observations, so the
+        # acquisition values were identical across iterations and picking
+        # argmax-then-remove `batch_size` times is exactly the top-`batch_size`
+        # points by acquisition value. We compute that directly in one pass
+        # (~batch_size x cheaper, and drops the dead fantasy/`lie_to_me` work).
+        #
+        # NOTE: this is pure-greedy top-k with no batch diversity. Real
+        # Kriging-Believer / Constant-Liar would require re-conditioning the
+        # model on each fantasy (e.g. botorch fantasize / get_fantasy_model)
+        # between picks — a separate, larger change if diversity is wanted.
+        _, _, acq_values = self.optimize_acquisition_function(design_space)
+        k = min(self.batch_size, acq_values.shape[0])
+        top = acq_values.topk(k)
+        X = design_space.unsqueeze(-2)
+        candidates = [X[i] for i in top.indices]
+        candidate_indices = top.indices.tolist()
+        candidate_acq_values = top.values
         return candidates, candidate_indices, candidate_acq_values
 
     @staticmethod
