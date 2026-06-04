@@ -87,6 +87,7 @@ class ModelConfig:
 
 MODEL_CONFIGS = {
     "t5-base": ModelConfig("t5-base", T5Config, T5EncoderModel),
+    "google-t5/t5-base": ModelConfig("google-t5/t5-base", T5Config, T5EncoderModel),
     "GT4SD/multitask-text-and-chemistry-t5-base-augm": ModelConfig(
         "GT4SD/multitask-text-and-chemistry-t5-base-augm",
         T5Config,

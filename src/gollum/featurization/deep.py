@@ -161,10 +161,13 @@ class LLMFeaturizer(BaseNNFeaturizer):
             input_ids = x[start_idx:end_idx, :ids_split].long()
             attn_mask = x[start_idx:end_idx, ids_split:].long()
 
+            _call = (
+                self.llm.encoder
+                if getattr(self.llm.config, "is_encoder_decoder", False)
+                else self.llm
+            )
             if self.trainable:
-                outputs = self.llm(
-                    input_ids=input_ids, attention_mask=attn_mask
-                )
+                outputs = _call(input_ids=input_ids, attention_mask=attn_mask)
 
             else:
                 self.llm.eval()
