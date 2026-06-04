@@ -427,6 +427,9 @@ def train(config):
     if config.get("benchmark", None) is not None:
         config = configure_benchmark_datasets(config)
 
+    if config.get("data_path", None) is not None:
+        config["data"]["init_args"]["data_path"] = config["data_path"]
+
     config = validate_configuration(config)
     wandb_config = flatten(config)
 
@@ -517,7 +520,10 @@ def main():
     parser.add_argument("--seed", type=int, help="Random seeds to use")
     parser.add_argument("--benchmark", type=str, help="Run a specific benchmark")
 
-    parser.add_argument("--n_iters", type=int, help="How many iterations to run")
+    # parser.add_argument("--n_iters", type=int, help="How many iterations to run")
+    parser.add_argument(
+        "--data_path", type=str, help="Data file csv path"
+    )
     parser.add_argument(
         "--phase1_iters", type=int, help="Phase-1 (train) BO iterations (full mode)"
     )
