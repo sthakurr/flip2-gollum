@@ -430,6 +430,9 @@ def train(config):
     if config.get("data_path", None) is not None:
         config["data"]["init_args"]["data_path"] = config["data_path"]
 
+    if config.get("init_method", None) is not None:
+        config["data"]["init_args"]["initializer"]["init_args"]["method"] = config["init_method"]
+
     config = validate_configuration(config)
     wandb_config = flatten(config)
 
@@ -530,6 +533,7 @@ def main():
     parser.add_argument(
         "--phase2_iters", type=int, help="Phase-2 (test) BO iterations (full mode)"
     )
+    parser.add_argument("--init_method", type=str, help="BO initialization method (e.g. true_random, sobol)")
     parser.add_argument(
         "--mode",
         type=str,

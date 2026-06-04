@@ -7,6 +7,8 @@ import torch
 from scipy.spatial.distance import cdist
 from sklearn.cluster import KMeans
 from sklearn_extra.cluster import KMedoids
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from torch.quasirandom import SobolEngine
 from sklearn.decomposition import PCA
 
 
@@ -156,6 +158,63 @@ class KMedoidsInitializer(Initializer):
 
         return kmedoids.medoid_indices_.tolist(), clusters
 
+class SobolInitializer(Initializer):
+    def __init__(self, n_clusters=96, seed=None, **kwargs):
+        print("\n" + "="*60 + "\n[CONFIRMATION] SoBoL is being used!\n" + "="*60 + "\n")
+        self.n_clusters = n_clusters
+        self.seed = seed
+
+    def fit(self, x, exclude=None):
+        x_init = torch_delete_rows(x, exclude) #! again this could be an issue
+        print(f"\n x_init shape: {x_init.shape}")
+        print(f" x_init sample (first row, first 10 elements): {x_init[0, :10]}")
+        print(f" x_init dtype: {x_init.dtype}\n")
+        device = x_init.device
+        x_numpy = x_init.cpu().numpy()
+
+        scaler = MinMaxScaler() #! manually/forcefully scale to 0 and 1 scale for Sobol sampling to work
+        x_normalized_numpy = scaler.fit_transform(x_numpy)
+        
+        x_scaled = torch.tensor(x_normalized_numpy, dtype=torch.float64).to(device) #! changed to torch.float64
+
+
+        print("[DEBUG] x_scaled to be passed within the Sobol initializer", x_scaled, x_scaled.size())
+
+
+        sobol = SobolEngine(dimension=x_scaled.shape[1], scramble=True, seed=self.seed)
+        sobol_samples = sobol.draw(self.n_clusters).to(device)
+
+        print("Sobol samples print", sobol_samples)
+        
+        # Calculate distances 
+        distances = torch.cdist(sobol_samples.float(), x_scaled.float())
+        
+        # Find the best unique matches
+        selected_indices = []
+        temp_distances = distances.clone()
+        num_to_select = self.n_clusters
+
+        # print("Sobol distances", distances, distances.size())
+
+        for _ in range(num_to_select): #! double check this!
+            min_distances, min_indices = temp_distances.min(dim=1) # gets the minimum distances of all clusters to all points
+
+            print("Sobol min distances, min indices", min_distances, min_indices) 
+
+            best_sobol_idx = torch.argmin(min_distances) # gets the minimum of those minimum distances
+            data_idx = min_indices[best_sobol_idx.item()]
+
+            print("Selected sobol point idx based on minimum distance", data_idx)
+
+            selected_indices.append(data_idx.item())
+
+            temp_distances[:, data_idx] = float('inf')      # Column: mark data point used
+            temp_distances[best_sobol_idx, :] = float('inf')  # Row: mark Sobol point done
+
+            # print("After marking temp_distance", temp_distances)
+
+        # The returned indices are positions that are valid for the original `x_init`.
+        return selected_indices, {}
 
 class BOInitializer:
     def __init__(
@@ -163,7 +222,7 @@ class BOInitializer:
         method: str = "kmedoids",
         metric: str = None,
         n_clusters: int = None,
-        init: str = "random",
+        init: str = "random", #! for kmeans/kmedoids initialization method
         use_pca: int = None,
         seed: int = None,
         predefined_points: List[int] = None,
@@ -176,6 +235,7 @@ class BOInitializer:
             "true_random": RandomInitializer,
             "kmeans": KMeansInitializer,
             "kmedoids": KMedoidsInitializer,
+            "sobol":      SobolInitializer,
         }
         if method not in self.methods:
             raise ValueError(f"Unknown init_method: {method}")

@@ -911,3 +911,4 @@ tests/
 embeddings_cache/
 
 jobs/
+configs/

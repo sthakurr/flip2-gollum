@@ -8,6 +8,7 @@ from gollum.featurization.utils.pooling import average_pool, last_token_pool, we
 from gollum.featurization.text import get_model_and_tokenizer
 from gollum.featurization.utils.layers import get_target_layers
 from torch.nn import init
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 class BaseNNFeaturizer(nn.Module):
     """
@@ -85,6 +86,11 @@ class LLMFeaturizer(BaseNNFeaturizer):
     ):
         super().__init__(input_dim=input_dim, projection_dim=projection_dim)
         print(model_name, "for LLM")
+        # ESM-C (EvolutionaryScale) is not a HuggingFace PreTrainedModel: it has a
+        # different forward signature (sequence_tokens) and output field
+        # (.embeddings), and needs manual gradient checkpointing.
+        self._uses_esmc = "esmc" in model_name.lower()
+        self.gradient_checkpointing = gradient_checkpointing
         self.llm, self.tokenizer = get_model_and_tokenizer(model_name, "cuda")
         if trainable:
             target_modules = get_target_layers(
@@ -109,14 +115,22 @@ class LLMFeaturizer(BaseNNFeaturizer):
             # so activation memory scales with the train-set size and OOMs on a
             # large LLM. enable_input_require_grads is required for checkpointing
             # to propagate gradients through a LoRA-wrapped frozen backbone.
-            if gradient_checkpointing:
-                self.llm.enable_input_require_grads()
+            if gradient_checkpointing and not self._uses_esmc:
+                # HF-native gradient checkpointing (ESM-C uses manual
+                # torch.utils.checkpoint in get_embeddings instead).
                 try:
-                    self.llm.gradient_checkpointing_enable(
-                        gradient_checkpointing_kwargs={"use_reentrant": False}
+                    self.llm.enable_input_require_grads()
+                    try:
+                        self.llm.gradient_checkpointing_enable(
+                            gradient_checkpointing_kwargs={"use_reentrant": False}
+                        )
+                    except TypeError:  # older transformers without the kwargs arg
+                        self.llm.gradient_checkpointing_enable()
+                except AttributeError:
+                    print(
+                        f"Gradient checkpointing not supported by {model_name}; "
+                        "skipping (fit may use more memory)."
                     )
-                except TypeError:  # older transformers without the kwargs arg
-                    self.llm.gradient_checkpointing_enable()
             self.llm.print_trainable_parameters()
         else:
             self.llm.requires_grad_(False)
@@ -161,22 +175,39 @@ class LLMFeaturizer(BaseNNFeaturizer):
             input_ids = x[start_idx:end_idx, :ids_split].long()
             attn_mask = x[start_idx:end_idx, ids_split:].long()
 
-            _call = (
-                self.llm.encoder
-                if getattr(self.llm.config, "is_encoder_decoder", False)
-                else self.llm
-            )
-            if self.trainable:
-                outputs = _call(input_ids=input_ids, attention_mask=attn_mask)
+            # Three-way forward dispatch:
+            #  - ESM-C: forward takes sequence_tokens (no attention_mask kwarg).
+            #  - encoder-decoder (e.g. T5): run only the encoder stack.
+            #  - plain HF encoder (e.g. ESM2): standard input_ids/attention_mask.
+            # Non-HF backbones (ESM-C) have no `.config`; guard the access so
+            # getattr's default applies (self.llm.config itself would raise).
+            _config = getattr(self.llm, "config", None)
+            is_enc_dec = getattr(_config, "is_encoder_decoder", False)
 
+            def _run(ids, mask):
+                if self._uses_esmc:
+                    return self.llm(sequence_tokens=ids, sequence_id=None)
+                if is_enc_dec:
+                    return self.llm.encoder(input_ids=ids, attention_mask=mask)
+                return self.llm(input_ids=ids, attention_mask=mask)
+
+            if self.trainable:
+                if self._uses_esmc and self.gradient_checkpointing:
+                    # Manual gradient checkpointing for ESM-C (recompute
+                    # activations on backward instead of storing them).
+                    outputs = grad_checkpoint(
+                        lambda t: _run(t, attn_mask), input_ids, use_reentrant=False
+                    )
+                else:
+                    outputs = _run(input_ids, attn_mask)
             else:
                 self.llm.eval()
                 with torch.no_grad():
-                    outputs = _call(
-                        input_ids=input_ids, attention_mask=attn_mask
-                    )
+                    outputs = _run(input_ids, attn_mask)
 
-            last_hidden_state = outputs.last_hidden_state
+            last_hidden_state = (
+                outputs.embeddings if self._uses_esmc else outputs.last_hidden_state
+            )
 
             if self.pooling_method == "average":
                 pooled = average_pool(last_hidden_state, attn_mask)
