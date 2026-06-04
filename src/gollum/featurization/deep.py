@@ -172,7 +172,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
             else:
                 self.llm.eval()
                 with torch.no_grad():
-                    outputs = self.llm(
+                    outputs = _call(
                         input_ids=input_ids, attention_mask=attn_mask
                     )
 
