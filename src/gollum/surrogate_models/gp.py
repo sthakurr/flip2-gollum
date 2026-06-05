@@ -10,7 +10,6 @@ from gpytorch import ExactMarginalLogLikelihood
 from gpytorch.constraints.constraints import GreaterThan
 from gpytorch.likelihoods.gaussian_likelihood import GaussianLikelihood
 from gpytorch.means import ConstantMean
-from botorch.models.utils.gpytorch_modules import get_covar_module_with_dim_scaled_prior
 from torch.optim.lr_scheduler import StepLR
 
 from botorch.optim.fit import fit_gpytorch_mll_torch
@@ -21,6 +20,7 @@ from botorch.models import SingleTaskGP
 from abc import ABC, abstractmethod
 from gpytorch.means.mean import Mean
 from gpytorch.module import Module
+from gollum.surrogate_models.kernels import build_covar_module
 
 from typing import Union
 import numpy as np
@@ -59,7 +59,11 @@ class GP(SurrogateModel, SingleTaskGP):
         initial_outputscale_val: float = 1.0,
         initial_lengthscale_val: float = 1.0,
         gp_lr: float = 0.2,
+        kernel: Union[str, None] = None,
     ) -> None:
+
+        if covar_module is None and kernel is not None:
+            covar_module = build_covar_module(kernel, dim=train_x.shape[-1])
 
         super().__init__(
             train_X=train_x,
@@ -208,6 +212,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         train_mll_additionally: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
         embedding_norm: str = "scale_to_bounds",
+        kernel: Union[str, None] = None,
     ) -> None:
 
         tkwargs = {
@@ -241,11 +246,10 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         )
 
         if covar_module is None:
-            # Dimension-scaled Matern-5/2 prior, correctly sized to the embedding
-            # dim (BoTorch's default would mis-size it to the token dimension).
-            covar_module = get_covar_module_with_dim_scaled_prior(
-                ard_num_dims=ft_out_dim, use_rbf_kernel=False
-            )
+            # Build the kernel sized to the finetuning OUTPUT dim (ft_out_dim),
+            # NOT train_x (tokens). Defaults to the dimension-scaled Hvarfner
+            # prior to preserve prior behavior when `kernel` is unspecified.
+            covar_module = build_covar_module(kernel or "matern_hvarfner", dim=ft_out_dim)
         if mean_module is None:
             mean_module = ConstantMean()
 

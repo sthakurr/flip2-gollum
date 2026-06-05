@@ -166,6 +166,24 @@ def validate_configuration(config):
     # check for invalid configurations
     if surrogate_class == "gollum.surrogate_models.gp.GP" and representation == "get_tokens":
         raise ValueError("Standard GP or PLLM shouldn't use 'get_tokens'. This is for trainable LLM models only.")
+    if surrogate_class == "gollum.surrogate_models.gp.DeepGP" and representation != "get_tokens":
+        raise ValueError("DeepGP surrogate requires 'get_tokens' representation.")
+
+    # Validate the one-word kernel selector, if used.
+    surrogate_args = config["surrogate_model"].get("init_args", {}) or {}
+    kernel = surrogate_args.get("kernel")
+    if kernel is not None:
+        from gollum.surrogate_models.kernels import VALID_KERNELS
+
+        if kernel not in VALID_KERNELS:
+            raise ValueError(
+                f"Unknown kernel '{kernel}'; choose one of {VALID_KERNELS}."
+            )
+        if surrogate_args.get("covar_module") is not None:
+            print(
+                "WARNING: both 'covar_module' and 'kernel' are set; the explicit "
+                "covar_module takes precedence and 'kernel' is ignored."
+            )
     
     # Ensure model embedding sizes are correct
     model_name = featurizer_config.get("model_name")
@@ -420,7 +438,9 @@ def make_run_name(config, mode):
         reduce_dim = config["data"]["init_args"].get("reduce_dim")
         if reduce_dim:
             base += f"_pca{reduce_dim}"
-    return f"{base}_{mode}_seed{config['seed']}"
+    kernel = (config["surrogate_model"].get("init_args", {}) or {}).get("kernel")
+    kernel_tag = f"_{kernel.replace('matern_', '')}" if kernel else ""
+    return f"{base}{kernel_tag}_{mode}_seed{config['seed']}"
 
 
 def train(config):
