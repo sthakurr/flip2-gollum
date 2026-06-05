@@ -251,7 +251,7 @@ class BOInitializer:
 
     def fit(self, x, exclude: list = None):
         x_init = torch_delete_rows(x, exclude)
-        selected_reactions, clusters = self.initializer.fit(x_init, exclude)
+        selected_reactions, clusters = self.initializer.fit(x_init, exclude=None)
         self.selected_reactions = [
             get_original_index(x_init.numpy()[i], x) for i in selected_reactions
         ]

@@ -9,6 +9,8 @@ from botorch.models.transforms.outcome import Standardize
 from gpytorch import ExactMarginalLogLikelihood
 from gpytorch.constraints.constraints import GreaterThan
 from gpytorch.likelihoods.gaussian_likelihood import GaussianLikelihood
+from gpytorch.means import ConstantMean
+from botorch.models.utils.gpytorch_modules import get_covar_module_with_dim_scaled_prior
 from torch.optim.lr_scheduler import StepLR
 
 from botorch.optim.fit import fit_gpytorch_mll_torch
@@ -205,6 +207,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         scale_embeddings: bool = False,
         train_mll_additionally: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
+        embedding_norm: str = "scale_to_bounds",
     ) -> None:
 
         tkwargs = {
@@ -228,8 +231,36 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.train_x = train_x
         self.train_y = train_y
 
+        # The kernel/normalization act on the finetuning model's OUTPUT (the
+        # projection if present, else the raw LLM embedding) — NOT on train_x
+        # (tokens). Size any default kernel and the LayerNorm to that dimension.
+        ft_out_dim = (
+            finetuning_model.projection_dim
+            if getattr(finetuning_model, "projection_dim", None)
+            else finetuning_model.input_dim
+        )
+
+        if covar_module is None:
+            # Dimension-scaled Matern-5/2 prior, correctly sized to the embedding
+            # dim (BoTorch's default would mis-size it to the token dimension).
+            covar_module = get_covar_module_with_dim_scaled_prior(
+                ard_num_dims=ft_out_dim, use_rbf_kernel=False
+            )
+        if mean_module is None:
+            mean_module = ConstantMean()
+
         self.mean_module = mean_module
         self.covar_module = covar_module
+
+        # Optional per-dim normalization of the embedding before the kernel.
+        # "layernorm" gives ~unit per-dim scale (the precondition for the
+        # dimension-scaled prior); "scale_to_bounds" only bounds the global range.
+        self.embedding_norm = embedding_norm
+        self.embed_norm = (
+            torch.nn.LayerNorm(ft_out_dim).to(**tkwargs)
+            if embedding_norm == "layernorm"
+            else None
+        )
 
         self.finetuning_model = finetuning_model
         self.finetuning_model = self.finetuning_model.to(**tkwargs)
@@ -269,7 +300,12 @@ class DeepGP(SurrogateModel, SingleTaskGP):
     def forward(self, x):
         finetuned = self.finetuning_model(x)
 
-        if self.scale_embeddings:
+        # Normalize the embedding before the kernel. LayerNorm (per-dim unit
+        # scale) takes precedence when enabled; otherwise fall back to the
+        # global range-bounding scale_to_bounds.
+        if self.embed_norm is not None:
+            finetuned = self.embed_norm(finetuned)
+        elif self.scale_embeddings:
             finetuned = self.scale_to_bounds(finetuned)
         self.finetuned = finetuned
 
@@ -319,7 +355,12 @@ class DeepGP(SurrogateModel, SingleTaskGP):
                 {"params": self.covar_module.parameters()},
                 {"params": self.mean_module.parameters()},
                 {"params": self.likelihood.parameters()},
-            ],
+            ]
+            + (
+                [{"params": self.embed_norm.parameters()}]
+                if self.embed_norm is not None
+                else []
+            ),
             lr=self.gp_lr,
             weight_decay=self.wd,
         )
