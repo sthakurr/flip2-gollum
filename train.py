@@ -331,24 +331,92 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
     log_bo_metrics(data_stats, dm.train_y, epoch=n_iters)
 
 
-def run_phase2(config, dm, bo, n_iters, epoch_offset=0):
-    """Phase-2 BO over the TEST split, seeded by the Phase-1-collected train
-    points (already accumulated in dm.train_*). The GP is re-fit each iteration
-    on the growing train set (Phase-1 seed + Phase-2 acquisitions). Logs
-    best-found and simple regret against the known test optimum.
+def _build_phase2_seed(config, dm, seed_source, seed_size, device):
+    """Build the Phase-2 GP seed + the test design space for a given baseline.
 
-    Operates purely on tensors (it does not touch dm's dataframe bookkeeping),
-    since the Phase-2 design space is the held-aside test set.
+    Returns (train_x, train_y, design_x, design_y, acquired_test_y), where
+    `acquired_test_y` holds TEST labels already observed at the start (only
+    non-empty for `none`, whose cold start spends an initial random TEST batch).
+
+    seed_source:
+      - "phase1_bo"   : the Phase-1 BO-collected train points (dm.train_*).
+      - "random_train": `seed_size` random points from the full train pool.
+      - "all_train"   : the entire train pool.
+      - "none"        : no train warm-start; bootstrap from `seed_size` random
+                        TEST points (design space = the remaining test).
+    """
+    test_x = dm.test_x.clone().to(device)
+    test_y = dm.test_y.clone().to(device)
+    empty_y = test_y.new_empty((0, test_y.shape[-1]))
+
+    if seed_source == "phase1_bo":
+        return (dm.train_x.clone().to(device), dm.train_y.clone().to(device),
+                test_x, test_y, empty_y)
+
+    if seed_source in ("random_train", "all_train"):
+        train_pool = np.concatenate(
+            [np.asarray(dm.train_indexes), np.asarray(dm.heldout_indices.cpu())]
+        )
+        if seed_source == "random_train":
+            rng = np.random.default_rng(config["seed"])
+            k = min(seed_size, len(train_pool))
+            idx = np.sort(rng.choice(train_pool, size=k, replace=False))
+        else:
+            idx = np.sort(train_pool)
+        seed_x = dm.x[idx].clone().to(device)
+        seed_y = dm.y[idx].clone().to(device)
+        return seed_x, seed_y, test_x, test_y, empty_y
+
+    if seed_source == "none":
+        # cold start from test set
+        rng = np.random.default_rng(int(config["seed"]))
+        test_y_flat = test_y.squeeze()
+        median = test_y_flat.median()
+        eligible = torch.where(test_y_flat <= median)[0].cpu().numpy()
+        k = min(seed_size, len(eligible))
+        init_idx_np = np.sort(rng.choice(eligible, size=k, replace=False))
+        init_idx = torch.as_tensor(init_idx_np, device=device, dtype=torch.long)
+        seed_x = test_x[init_idx].clone()
+        seed_y = test_y[init_idx].clone()
+        mask = torch.ones(test_x.shape[0], dtype=torch.bool, device=device)
+        mask[init_idx] = False
+        return seed_x, seed_y, test_x[mask], test_y[mask], seed_y.clone()
+
+    raise ValueError(
+        f"Unknown seed_source '{seed_source}'; choose "
+        "phase1_bo | random_train | all_train | none."
+    )
+
+
+def run_phase2(config, dm, bo, n_iters, epoch_offset=0,
+               seed_source="phase1_bo", seed_size=None):
+    """
+    Phase-2 BO over the test split. The GP is re-fit each iteration on the
+    growing set (seed + Phase-2 test acquisitions). 
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if dm.test_x is None:
         raise ValueError("Phase 2 needs a held-aside test set; set respect_split: true.")
 
+    # Resolve the seed size. `random_train` defaults to the Phase-1 budget
+    # (init + phase1_iters*batch) so it's a fair same-size control for
+    # `phase1_bo`; `none` defaults to a single cold-start batch (a large random
+    # test init would unfairly inflate its coverage head-start). `all_train`
+    # ignores seed_size. An explicit --phase2_seed_size overrides both.
+    batch = config["bo"]["init_args"].get("batch_size", 96)
+    if seed_size is None:
+        seed_size = config.get("phase2_seed_size")
+    if seed_size is None:
+        if seed_source == "none":
+            seed_size = batch
+        else:
+            p1 = config.get("phase1_iters") or config.get("n_iters", 3)
+            seed_size = len(dm.train_indexes) + p1 * batch
+
     test_stats = calculate_data_stats(dm.test_x, dm.test_y)
     f_max = dm.test_y.max().item()
 
     # Top-q% coverage denominators: how many test points fall in each top band.
-    # coverage_top{p} = (# acquired in band) / (# test points in band).
     test_y_flat = dm.test_y.squeeze()
     coverage_bands = {}  # label (e.g. 5) -> (threshold, band_size)
     for q, label in [(0.99, 1), (0.95, 5), (0.90, 10)]:
@@ -356,16 +424,37 @@ def run_phase2(config, dm, bo, n_iters, epoch_offset=0):
         band_size = int((test_y_flat >= thr).sum().item())
         coverage_bands[label] = (thr, max(band_size, 1))
 
-    train_x = dm.train_x.clone().to(device)
-    train_y = dm.train_y.clone().to(device)
-    design_x = dm.test_x.clone().to(device)
-    design_y = dm.test_y.clone().to(device)
-
-    n_seed = train_y.shape[0]
-    print(
-        f"Phase 2: seeded with {n_seed} train points, discovering over "
-        f"{design_x.shape[0]} test candidates for {n_iters} iters (test max {f_max:.4f})"
+    train_x, train_y, design_x, design_y, acquired_test_y = _build_phase2_seed(
+        config, dm, seed_source, seed_size, device
     )
+
+    print(
+        f"Phase 2 [seed_source={seed_source}]: seeded with {train_x.shape[0]} points, "
+        f"discovering over {design_x.shape[0]} test candidates for {n_iters} iters "
+        f"(test max {f_max:.4f})"
+    )
+
+    def _log_metrics(epoch, new_y):
+        best = acquired_test_y.max().item() if acquired_test_y.numel() else float("nan")
+        wandb.log(
+            {
+                "phase2/best_test": best,
+                "phase2/simple_regret": f_max - best,
+                "phase2/n_acquired": int(acquired_test_y.shape[0]),
+                "phase2/evaluated_suggestions": wandb.Histogram(new_y.cpu()),
+                "epoch": epoch,
+            }
+        )
+        log_bo_metrics(test_stats, acquired_test_y, epoch=epoch, prefix="phase2/")
+        flat = acquired_test_y.squeeze()
+        for label, (thr, band_size) in coverage_bands.items():
+            n_hit = int((flat >= thr.to(flat.device)).sum().item())
+            wandb.log({f"phase2/coverage_top{label}": n_hit / band_size, "epoch": epoch})
+
+    # Log the starting point (iter -1 relative): for `none` the random test init
+    # already contributes coverage; for train seeds acquired_test_y is empty.
+    if acquired_test_y.numel():
+        _log_metrics(epoch_offset, acquired_test_y)
 
     for i in tqdm(range(n_iters), colour="green"):
         if design_x.shape[0] == 0:
@@ -383,37 +472,18 @@ def run_phase2(config, dm, bo, n_iters, epoch_offset=0):
 
         train_x = torch.cat([train_x, new_x], dim=0)
         train_y = torch.cat([train_y, new_y], dim=0)
+        acquired_test_y = torch.cat([acquired_test_y, new_y], dim=0)
         # Device-safe row removal (indices live on the same device as design_x).
         keep = torch.ones(design_x.shape[0], dtype=torch.bool, device=design_x.device)
         keep[indices] = False
         design_x = design_x[keep]
         design_y = design_y[keep]
 
-        acquired_y = train_y[n_seed:]
-        best = acquired_y.max().item()
-        epoch = epoch_offset + i
-        wandb.log(
-            {
-                "phase2/best_test": best,
-                "phase2/simple_regret": f_max - best,
-                "phase2/n_acquired": int(acquired_y.shape[0]),
-                "phase2/evaluated_suggestions": wandb.Histogram(new_y.cpu()),
-                "epoch": epoch,
-            }
-        )
-        log_bo_metrics(test_stats, acquired_y, epoch=epoch, prefix="phase2/")
+        _log_metrics(epoch_offset + 1 + i, new_y)
 
-        # Normalized top-q% coverage: fraction of the test top band acquired so far.
-        acquired_flat = acquired_y.squeeze()
-        for label, (thr, band_size) in coverage_bands.items():
-            n_hit = int((acquired_flat >= thr.to(acquired_flat.device)).sum().item())
-            wandb.log(
-                {f"phase2/coverage_top{label}": n_hit / band_size, "epoch": epoch}
-            )
-
-    final_best = train_y[n_seed:].max().item()
+    final_best = acquired_test_y.max().item() if acquired_test_y.numel() else float("nan")
     print(
-        f"Phase 2 done: best test value {final_best:.4f} "
+        f"Phase 2 done [seed_source={seed_source}]: best test value {final_best:.4f} "
         f"(test max {f_max:.4f}, final simple regret {f_max - final_best:.4f})"
     )
 
@@ -475,13 +545,16 @@ def train(config):
         phase2_iters = config.get("phase2_iters") or config.get("n_iters", 3)
 
         if mode == "full":
-            # Phase 1: BO collection over the train pool. Then report the gate
-            # (test Spearman/NLPD/top-k of the Phase-1-trained GP — the seed's
-            # transfer quality) before Phase 2: BO discovery over the test split
-            # seeded by the collected points.
-            run_bo(config, dm, bo, data_stats, n_iters=phase1_iters)
-            run_gate(config, dm, bo)
-            run_phase2(config, dm, bo, phase2_iters, epoch_offset=phase1_iters + 1)
+            # `or` (not get-with-default): the CLI registers seed_source as
+            # present-but-None when unset, so a plain .get would return None.
+            seed_source = config.get("seed_source") or "phase1_bo"
+            if seed_source == "phase1_bo":
+                run_bo(config, dm, bo, data_stats, n_iters=phase1_iters)
+                run_gate(config, dm, bo)
+            run_phase2(
+                config, dm, bo, phase2_iters,
+                epoch_offset=phase1_iters + 1, seed_source=seed_source,
+            )
         else:
             # For `both`: Phase-1 BO collection over train, then gate-evaluate
             # the resulting GP on the held-aside test split.
@@ -534,9 +607,6 @@ def main():
     # Initialize the parser with a description
     parser = ArgumentParser(
         description="Training script",
-        # No default config: arm configs are self-contained and passed via
-        # --config. A default config would otherwise leak its keys (e.g.
-        # reduce_dim) into any run whose --config omits them.
         default_config_files=[],
     )
     parser.add_argument("--config", action=ActionConfigFile)
@@ -552,6 +622,17 @@ def main():
     )
     parser.add_argument(
         "--phase2_iters", type=int, help="Phase-2 (test) BO iterations (full mode)"
+    )
+    parser.add_argument(
+        "--seed_source",
+        type=str,
+        default="phase1_bo",
+        help="Phase-2 seed baseline: phase1_bo | random_train | all_train | none",
+    )
+    parser.add_argument(
+        "--phase2_seed_size",
+        type=int,
+        help="Seed size for random_train / none (default: matched to Phase-1 budget)",
     )
     parser.add_argument("--init_method", type=str, help="BO initialization method (e.g. true_random, sobol)")
     parser.add_argument(
