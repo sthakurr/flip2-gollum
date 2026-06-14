@@ -50,6 +50,7 @@ class Featurizer:
         # from gollum.featurization.reaction import rxnfp, drfp, one_hot
         from gollum.featurization.general import precalculated, all_continuous
         from gollum.featurization.protein import one_hot_matrix
+        from gollum.featurization.mutation import get_mutation_context_features
 
         return {
             "fingerprints": fingerprints,
@@ -64,6 +65,7 @@ class Featurizer:
             "onehot": one_hot_matrix,
             "get_esmc_embeddings": get_esmc_embeddings,
             "get_esmc_sae_features": get_esmc_sae_features,
+            "mutation_context": get_mutation_context_features,
         }
     
     @property

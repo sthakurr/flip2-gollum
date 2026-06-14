@@ -564,7 +564,7 @@ def train(config):
                 run_gate(config, dm, bo)
 
         # Save finetuned model if using DeepGP
-        if config["surrogate_model"]["class_path"] == "gollum.surrogate_models.gp.DeepGP":
+        if config["surrogate_model"]["class_path"] == "gollum.surrogate_models.gp.DeepGP" and config["save_model"] == True:
             model_save_path = os.path.join(
                 "checkpoints", run.name if run else "default", "finetuned_model.pt"
             )
@@ -644,6 +644,7 @@ def main():
     )
     parser.add_argument("--group", type=str, help="Wandb group runs")
     parser.add_argument("--name", type=str, default=None, help="Wandb run name base")
+    parser.add_argument("--save_model", type=bool, default=False, help="Save the finetuned model after training")
     parser.add_argument("--visualize", type=bool, default=False, help="Visualize embeddings after training")
     parser.add_argument("--full_data_path", type=str, default=None, help="Path to full dataset with split labels (for visualization)")
 
