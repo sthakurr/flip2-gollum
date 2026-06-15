@@ -398,11 +398,6 @@ def run_phase2(config, dm, bo, n_iters, epoch_offset=0,
     if dm.test_x is None:
         raise ValueError("Phase 2 needs a held-aside test set; set respect_split: true.")
 
-    # Resolve the seed size. `random_train` defaults to the Phase-1 budget
-    # (init + phase1_iters*batch) so it's a fair same-size control for
-    # `phase1_bo`; `none` defaults to a single cold-start batch (a large random
-    # test init would unfairly inflate its coverage head-start). `all_train`
-    # ignores seed_size. An explicit --phase2_seed_size overrides both.
     batch = config["bo"]["init_args"].get("batch_size", 96)
     if seed_size is None:
         seed_size = config.get("phase2_seed_size")
@@ -530,7 +525,7 @@ def train(config):
     run_name = make_run_name(config, mode)
 
     with wandb.init(
-        project="flip2_gollum_rep_comparison", config=wandb_config, group=config["group"], name=run_name
+        project="flip2_gollum_seed_source_comparison", config=wandb_config, group=config["group"], name=run_name
     ) as run:
 
         dm = setup_data(config)
@@ -634,6 +629,7 @@ def main():
         type=int,
         help="Seed size for random_train / none (default: matched to Phase-1 budget)",
     )
+    parser.add_argument("--kernel", type=str, help="One-word kernel selector (e.g. matern_stuyver)")
     parser.add_argument("--init_method", type=str, help="BO initialization method (e.g. true_random, sobol)")
     parser.add_argument(
         "--mode",

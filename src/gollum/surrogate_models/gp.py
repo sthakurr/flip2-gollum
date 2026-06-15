@@ -303,10 +303,6 @@ class DeepGP(SurrogateModel, SingleTaskGP):
 
     def forward(self, x):
         finetuned = self.finetuning_model(x)
-
-        # Normalize the embedding before the kernel. LayerNorm (per-dim unit
-        # scale) takes precedence when enabled; otherwise fall back to the
-        # global range-bounding scale_to_bounds.
         if self.embed_norm is not None:
             finetuned = self.embed_norm(finetuned)
         elif self.scale_embeddings:

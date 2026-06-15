@@ -20,6 +20,9 @@ class Featurizer:
         pooling_method: Optional[str] = None,
         normalize_embeddings: bool = False,
         sae_weights_path: Optional[str] = None,
+        mc_aggregate: str = "sum",
+        mc_delta: bool = True,
+        mc_structured: bool = True,
     ):
         self.representation = representation
 
@@ -30,6 +33,9 @@ class Featurizer:
             "pooling_method": pooling_method,
             "normalize_embeddings": normalize_embeddings,
             "sae_weights_path": sae_weights_path,
+            "mc_aggregate": mc_aggregate,
+            "mc_delta": mc_delta,
+            "mc_structured": mc_structured,
         }
         self._featurization_registry = self._build_registry()
         self._output_dim = None

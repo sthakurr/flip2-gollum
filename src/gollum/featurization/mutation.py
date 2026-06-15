@@ -68,8 +68,18 @@ def _consensus(seqs):
     return "".join(cons)
 
 
-def _structured(seqs, consensus):
-    feats = np.zeros((len(seqs), PER_MUT_DIM + 1), dtype=np.float64)  # +1 = count
+def _structured(seqs, consensus, aggregate="sum"):
+    """Aggregate per-mutation vectors into one fixed-size vector per sequence.
+
+    - "sum": sum over mutations + appended count. Magnitude scales with mutation
+      depth — fine when train/test depth is balanced, but it makes deep-test
+      features out-of-distribution when train is shallow (e.g. two_to_many).
+    - "mean": mean over mutations, NO count appended. Depth-invariant in scale,
+      so the per-mutation *profile* is comparable at 2 or 12 mutations.
+    """
+    include_count = aggregate == "sum"
+    dim = PER_MUT_DIM + (1 if include_count else 0)
+    feats = np.zeros((len(seqs), dim), dtype=np.float64)
     for i, s in enumerate(seqs):
         acc = np.zeros(PER_MUT_DIM)
         n_mut = 0
@@ -79,21 +89,46 @@ def _structured(seqs, consensus):
                 da, db = _DESC[a], _DESC[b]
                 acc += np.concatenate([_pos_enc(p), da, db, db - da])
                 n_mut += 1
+        if aggregate == "mean" and n_mut > 0:
+            acc = acc / n_mut
         feats[i, :PER_MUT_DIM] = acc
-        feats[i, -1] = n_mut
+        if include_count:
+            feats[i, -1] = n_mut
     return feats
 
 
-def get_mutation_context_features(texts, model_name=None, pooling_method="average"):
-    """Structured mutation-context features vs a per-dataset consensus wild-type.
+def get_mutation_context_features(
+    texts, model_name=None, pooling_method="average", mc_aggregate="sum",
+    mc_delta=True, mc_structured=True,
+):
+    """Mutation-context features vs a per-dataset consensus wild-type.
 
-    If ``model_name`` is given, the ESM2/PLM Delta-embedding
-    (embed(variant) - embed(consensus)) is concatenated; otherwise the
-    structured descriptors are returned alone (plain-GP ready).
+    Channels (concatenated):
+    - structured descriptors (if ``mc_structured``): per-mutation physicochemical
+      encoding aggregated over the variant's mutations.
+    - PLM embedding (if ``model_name`` given): either the Delta-embedding
+      ``embed(variant) - embed(consensus)`` (``mc_delta=True``, *reference-relative*)
+      or the plain ``embed(variant)`` (``mc_delta=False``, *absolute*).
+
+    These two flags enable the 2x2 decomposition {plain | Delta} x {±structured}
+    that separates the value of the reference-relative framing from the structured
+    channel. ``mc_aggregate`` ("sum" | "mean") controls structured aggregation.
     """
+    if mc_aggregate not in ("sum", "mean"):
+        raise ValueError(f"mc_aggregate must be 'sum' or 'mean', got '{mc_aggregate}'.")
+    if not mc_structured and not model_name:
+        raise ValueError(
+            "Nothing to featurize: mc_structured=False and no model_name. "
+            "Enable mc_structured or provide model_name."
+        )
     seqs = texts.tolist() if hasattr(texts, "tolist") else list(texts)
     consensus = _consensus(seqs)
-    structured = _structured(seqs, consensus)
+
+    channels, dims = [], []
+    if mc_structured:
+        s = _structured(seqs, consensus, aggregate=mc_aggregate)
+        channels.append(s)
+        dims.append(f"structured({mc_aggregate})={s.shape[1]}")
 
     if model_name:
         from gollum.featurization.text import get_huggingface_embeddings
@@ -101,16 +136,14 @@ def get_mutation_context_features(texts, model_name=None, pooling_method="averag
         emb = get_huggingface_embeddings(
             seqs, model_name=model_name, pooling_method=pooling_method
         )
-        cons_emb = get_huggingface_embeddings(
-            [consensus], model_name=model_name, pooling_method=pooling_method
-        )
-        delta = emb - cons_emb  # (N, D) - (1, D) broadcast
-        feats = np.concatenate([structured, delta], axis=1)
-    else:
-        feats = structured
+        if mc_delta:
+            cons_emb = get_huggingface_embeddings(
+                [consensus], model_name=model_name, pooling_method=pooling_method
+            )
+            emb = emb - cons_emb  # (N, D) - (1, D) broadcast; reference-relative
+        channels.append(emb)
+        dims.append(f"{'delta' if mc_delta else 'plain'}_emb={emb.shape[1]}")
 
-    print(
-        f"mutation_context: structured dim={structured.shape[1]}, "
-        f"total dim={feats.shape[1]} (model_name={model_name})"
-    )
+    feats = channels[0] if len(channels) == 1 else np.concatenate(channels, axis=1)
+    print(f"mutation_context: {' + '.join(dims)} -> total dim={feats.shape[1]}")
     return feats.astype(np.float32)

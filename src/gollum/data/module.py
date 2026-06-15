@@ -77,7 +77,7 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         )
         self.exclude_top = exclude_top
         self.normalize_input = normalize_input
-        # Two-phase (train->test) options: when respect_split is True the initial
+        # Two-phase options: when respect_split is true, the initial
         # (Phase-1) sample is drawn only from rows where split_column=="train" and
         # the held-out design space (Phase-2 candidates) is the "test" rows.
         self.respect_split = respect_split

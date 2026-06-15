@@ -9,18 +9,18 @@ data:
     exclude_top: true
     respect_split: true          # honor the FLIP train/test `set` column
     split_column: set
-    normalize_input: standard_scaling_per_dim
-    reduce_dim: null               # no PCA for this arm (guard against config-merge leaks)
+    normalize_input: original
+    reduce_dim: null              
     featurizer:
       class_path: gollum.data.module.Featurizer
       init_args:
-        representation: onehot     # flatten one-hot, drop zero-variance columns
+        representation: onehot     
         model_name: onehot         # label only (ignored by the featurizer)
     initializer:
       class_path: gollum.initialization.initializers.BOInitializer
       init_args:
-        method: true_random
-        n_clusters: 96            # Phase-1 budget (~3 x 96)
+        method: sobol
+        n_clusters: 96            
 bo:
   class_path: gollum.bo.optimizer.BotorchOptimizer
   init_args:
@@ -43,8 +43,10 @@ surrogate_model:
     noise_constraint: 1.0e-04
     initial_outputscale_val: 1.0
     initial_lengthscale_val: 3.0
-name: onehot                       # W&B run name base
-mode: full                         # full = collect batch_size+(phase1_itersxbatch_size) via BO over train
+name: onehot_orig                       # W&B run name base
+mode: full                        
 phase1_iters: 3
 phase2_iters: 5
+seed_source: phase1_bo
+kernel: matern_plain
 seed: 0

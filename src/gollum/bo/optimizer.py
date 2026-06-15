@@ -91,8 +91,6 @@ class BotorchOptimizer:
             return [best_point]
         else:
             candidates, _indices, _acq_values = self.optimize_acquisition_function_batch(
-                train_x,
-                train_y,
                 design_space,
             )
             return candidates
@@ -102,35 +100,18 @@ class BotorchOptimizer:
         design_space,
         chunk_size: int = 256,
     ):
-        # Evaluate the acquisition function in chunks over the design space. For
-        # high-dimensional reps (e.g. one-hot, D~1786) in float64 the kernel
-        # materializes an (N, n_train, D) intermediate; doing all N candidates at
-        # once OOMs, so we process `chunk_size` candidates at a time.
         with torch.no_grad():
             X = design_space.unsqueeze(-2)
             acq_chunks = []
             for start in range(0, X.shape[0], chunk_size):
                 chunk = X[start : start + chunk_size]
-                # reshape(-1) (not squeeze(-1)): a size-1 chunk would otherwise
-                # collapse to a 0-dim scalar that torch.cat can't concatenate.
                 acq_chunks.append(self.acquisition_function(chunk).reshape(-1))
             acq_values = torch.cat(acq_chunks, dim=0)
         best_indices = acq_values.topk(1)[1]
         best_point = X[best_indices].squeeze(1)
         return best_point, best_indices, acq_values
 
-    def optimize_acquisition_function_batch(self, train_x, train_y, design_space):
-        # The previous Kriging/Constant-Liar loop never re-conditioned the
-        # surrogate or acquisition function on its fantasy observations, so the
-        # acquisition values were identical across iterations and picking
-        # argmax-then-remove `batch_size` times is exactly the top-`batch_size`
-        # points by acquisition value. We compute that directly in one pass
-        # (~batch_size x cheaper, and drops the dead fantasy/`lie_to_me` work).
-        #
-        # NOTE: this is pure-greedy top-k with no batch diversity. Real
-        # Kriging-Believer / Constant-Liar would require re-conditioning the
-        # model on each fantasy (e.g. botorch fantasize / get_fantasy_model)
-        # between picks — a separate, larger change if diversity is wanted.
+    def optimize_acquisition_function_batch(self, design_space):
         _, _, acq_values = self.optimize_acquisition_function(design_space)
         k = min(self.batch_size, acq_values.shape[0])
         top = acq_values.topk(k)

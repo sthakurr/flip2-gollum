@@ -48,4 +48,5 @@ name: static_esm2_dense
 mode: gate
 phase1_iters: 3
 phase2_iters: 5
+kernel: matern_stuyver
 seed: 0
