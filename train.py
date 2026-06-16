@@ -167,8 +167,17 @@ def validate_configuration(config):
     # check for invalid configurations
     if surrogate_class == "gollum.surrogate_models.gp.GP" and representation == "get_tokens":
         raise ValueError("Standard GP or PLLM shouldn't use 'get_tokens'. This is for trainable LLM models only.")
-    if surrogate_class == "gollum.surrogate_models.gp.DeepGP" and representation != "get_tokens":
-        raise ValueError("DeepGP surrogate requires 'get_tokens' representation.")
+    if surrogate_class == "gollum.surrogate_models.gp.DeepGP":
+        ft_class = (
+            config["surrogate_model"].get("init_args", {})
+            .get("finetuning_model", {})
+            .get("class_path", "")
+        )
+        is_llm_featurizer = "LLMFeaturizer" in ft_class
+        if is_llm_featurizer and representation != "get_tokens":
+            raise ValueError("DeepGP with LLMFeaturizer requires 'get_tokens' representation.")
+        if not is_llm_featurizer and representation == "get_tokens":
+            raise ValueError("DeepGP with ProjectionLayer requires pre-computed embeddings, not 'get_tokens'.")
 
     # Validate the one-word kernel selector, if used.
     surrogate_args = config["surrogate_model"].get("init_args", {}) or {}
@@ -549,8 +558,6 @@ def train(config):
         config["data"]["init_args"]["initializer"]["init_args"]["method"] = config["init_method"]
 
     if config.get("kernel", None) is not None:
-        if "init_args" not in config["surrogate_model"]:
-            config["surrogate_model"]["init_args"] = {}
         config["surrogate_model"]["init_args"]["kernel"] = config["kernel"]
 
     config = validate_configuration(config)
