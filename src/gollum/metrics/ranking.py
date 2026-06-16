@@ -107,3 +107,104 @@ def log_surrogate_eval(posterior, y, stage="test", ks=(1, 3, 5, 10), epoch=0):
     if wandb.run is not None:
         wandb.log({**metrics, "epoch": epoch})
     return metrics
+
+
+def _embed_for_kernel(model, x):
+    """Map raw inputs into the space the kernel actually acts on.
+
+    DeepGP: push through the trained feature map (finetuning_model + the same
+    embed_norm / scale_to_bounds applied in ``forward``). Plain GP: apply the
+    BoTorch input transform (Normalize). Returns a detached tensor on the
+    kernel's device.
+    """
+    model.eval()
+    with torch.no_grad():
+        if getattr(model, "finetuning_model", None) is not None:
+            emb = model.finetuning_model(x)
+            if getattr(model, "embed_norm", None) is not None:
+                emb = model.embed_norm(emb)
+            elif getattr(model, "scale_embeddings", False):
+                emb = model.scale_to_bounds(emb)
+        elif hasattr(model, "transform_inputs"):
+            emb = model.transform_inputs(x)
+        else:
+            emb = x
+    return emb
+
+
+def log_prior_correlation(
+    model, train_x, test_x, stage="test", n_ref=8, far_frac=0.1, seed=0, epoch=0
+):
+    """Ober-style prior-correlation diagnostic for a fitted surrogate.
+
+    For random *train* reference points, compute the normalized kernel
+    correlation rho(ref, x) = K(ref,x) / sqrt(K(ref,ref) K(x,x)) against the
+    train set and the held-aside test set, evaluated in the space the kernel
+    acts on (DeepGP feature map / GP input transform). A healthy SE-like kernel
+    decays with distance; the DKL pathology keeps rho high/flat for far points.
+
+    Logs to W&B: rho histograms (ref->train, ref->test), the mean |rho| to the
+    farthest ``far_frac`` of points (the "flatness" number), and a rho-vs-
+    embedding-distance scatter. Returns a small summary dict.
+    """
+    import wandb
+
+    emb_tr = _embed_for_kernel(model, train_x)
+    emb_te = _embed_for_kernel(model, test_x)
+    emb = torch.cat([emb_tr, emb_te], dim=0)
+    n_tr = emb_tr.shape[0]
+
+    with torch.no_grad():
+        K = model.covar_module(emb).evaluate()
+        d = torch.sqrt(torch.diag(K).clamp_min(1e-12))
+        rho = (K / d.unsqueeze(0) / d.unsqueeze(1)).cpu()
+        dist = torch.cdist(emb, emb).cpu()
+
+    g = torch.Generator().manual_seed(seed)
+    refs = torch.randperm(n_tr, generator=g)[: min(n_ref, n_tr)]
+
+    rho_tr, rho_te, far_tr, far_te, sc_d, sc_r = [], [], [], [], [], []
+    for r in refs.tolist():
+        rr = rho[r].clone()
+        rr[r] = float("nan")  # drop self
+        tr_vals = rr[:n_tr]
+        te_vals = rr[n_tr:]
+        tr_vals = tr_vals[~torch.isnan(tr_vals)]
+        rho_tr.append(tr_vals)
+        rho_te.append(te_vals)
+        # "flatness": correlation to the farthest far_frac of all points
+        dr = dist[r].clone()
+        dr[r] = -1.0
+        k_far = max(1, int(far_frac * dr.shape[0]))
+        far_idx = dr.topk(k_far).indices
+        far_tr.append(rho[r][far_idx[far_idx < n_tr]])
+        far_te.append(rho[r][far_idx[far_idx >= n_tr]])
+        sc_d.append(dist[r])
+        sc_r.append(rho[r])
+
+    rho_tr = torch.cat(rho_tr)
+    rho_te = torch.cat(rho_te)
+    far_all = torch.cat([torch.cat(far_tr), torch.cat(far_te)])
+    summary = {
+        f"prior_corr/{stage}/rho_train_mean": rho_tr.mean().item(),
+        f"prior_corr/{stage}/rho_test_mean": rho_te.mean().item(),
+        f"prior_corr/{stage}/rho_far_absmean": far_all.abs().mean().item(),
+    }
+
+    if wandb.run is not None:
+        log = {**summary, "epoch": epoch}
+        log[f"prior_corr/{stage}/rho_train_hist"] = wandb.Histogram(
+            rho_tr.numpy()
+        )
+        log[f"prior_corr/{stage}/rho_test_hist"] = wandb.Histogram(rho_te.numpy())
+        sc_d = torch.cat(sc_d).numpy()
+        sc_r = torch.cat(sc_r).numpy()
+        table = wandb.Table(
+            data=list(zip(sc_d.tolist(), sc_r.tolist())),
+            columns=["embed_distance", "rho"],
+        )
+        log[f"prior_corr/{stage}/rho_vs_dist"] = wandb.plot.scatter(
+            table, "embed_distance", "rho", title=f"rho vs distance ({stage})"
+        )
+        wandb.log(log)
+    return summary

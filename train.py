@@ -54,6 +54,7 @@ from gollum.metrics import (
     log_bo_metrics,
     log_data_stats,
     log_surrogate_eval,
+    log_prior_correlation,
 )
 
 
@@ -254,6 +255,13 @@ def run_gate(config, dm, bo):
     posterior = bo.surrogate_model.predict(test_x, return_posterior=True)
     metrics = log_surrogate_eval(
         posterior, test_y, stage="test", epoch=config.get("n_iters", 0)
+    )
+    # Ober-style prior-correlation diagnostic: how does a random train point
+    # correlate with other train points vs test points under the fitted kernel?
+    # Comment out when not needed.
+    log_prior_correlation(
+        bo.surrogate_model, train_x, test_x, stage="test",
+        epoch=config.get("n_iters", 0),
     )
     print("Gate metrics (train->test):")
     for k, v in metrics.items():

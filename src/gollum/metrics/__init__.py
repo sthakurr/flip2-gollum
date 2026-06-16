@@ -12,6 +12,7 @@ from .ranking import (
     precision_at_k,
     calculate_ranking_metrics,
     log_surrogate_eval,
+    log_prior_correlation,
 )
 
 all = [
@@ -28,4 +29,5 @@ all = [
     "precision_at_k",
     "calculate_ranking_metrics",
     "log_surrogate_eval",
+    "log_prior_correlation",
 ]
