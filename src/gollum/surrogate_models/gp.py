@@ -213,6 +213,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
         embedding_norm: str = "scale_to_bounds",
         kernel: Union[str, None] = None,
+        max_fit_iter: int = 50,
     ) -> None:
 
         tkwargs = {
@@ -298,6 +299,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.wd_llm = wd_llm
         self.scale_embeddings = scale_embeddings
         self.train_mll_additionally = train_mll_additionally
+        self.max_fit_iter = max_fit_iter
 
         self.to_gpu()
 
@@ -335,12 +337,26 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         mll.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
+        # --- DEBUG timing: per-step loss + wall-clock. Comment out when done. ---
+        import time as _time
+        _dbg = {"step": 0, "t0": _time.perf_counter(), "t_prev": _time.perf_counter()}
+
         def gp_closure():
             self.optimizer.zero_grad()
             output = self(self.train_x)
             mll_loss = -mll(output, self.train_targets.squeeze())
             mll_loss.backward()
             grads = [p.grad for p in self.parameters() if p.requires_grad]
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            _now = _time.perf_counter()
+            _dbg["step"] += 1
+            print(
+                f"[fit] step {_dbg['step']:3d}  loss={mll_loss.item():.6f}  "
+                f"dt={_now - _dbg['t_prev']:.3f}s  total={_now - _dbg['t0']:.2f}s",
+                flush=True,
+            )
+            _dbg["t_prev"] = _now
             return mll_loss, grads
 
         self.optimizer = torch.optim.AdamW(
@@ -376,8 +392,17 @@ class DeepGP(SurrogateModel, SingleTaskGP):
             mll,
             closure=gp_closure,
             optimizer=fit_gpytorch_mll_torch,
-            optimizer_kwargs={"optimizer": self.optimizer, "scheduler": scheduler},
-            
+            optimizer_kwargs={
+                "optimizer": self.optimizer,
+                "scheduler": scheduler,
+                "step_limit": self.max_fit_iter,
+            },
+        )
+        print(
+            f"[fit] DONE  {_dbg['step']} steps in {_time.perf_counter() - _dbg['t0']:.2f}s "
+            f"({(_time.perf_counter() - _dbg['t0']) / max(_dbg['step'], 1):.3f}s/step)  "
+            f"trainable_params={total_params}",
+            flush=True,
         )
 
         if self.train_mll_additionally:

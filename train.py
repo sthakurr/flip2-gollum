@@ -273,6 +273,26 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
     """Phase-1 BO loop: iteratively acquire candidates from the held-out design
     space (the remaining train pool when respect_split is set)."""
     n_iters = n_iters if n_iters is not None else config["n_iters"]
+
+    # Top-q% coverage over the TRAIN pool only (seed + heldout design space),
+    # fixed at the start of Phase-1. Tracks what fraction of the top-q% training
+    # points the BO has pulled into the observed train set each iteration.
+    full_train_x = torch.cat([dm.train_x, dm.heldout_x], dim=0)
+    full_train_y = torch.cat([dm.train_y, dm.heldout_y], dim=0)
+    train_pool_stats = calculate_data_stats(full_train_x, full_train_y)
+    train_y_flat = full_train_y.squeeze()
+    coverage_bands = {}  # label (e.g. 5) -> (threshold, band_size)
+    for q, label in [(0.99, 1), (0.95, 5), (0.90, 10)]:
+        thr = train_pool_stats[f"target_q{int(q * 100)}"]
+        band_size = int((train_y_flat >= thr).sum().item())
+        coverage_bands[label] = (thr, max(band_size, 1))
+
+    def _log_train_coverage(epoch):
+        flat = dm.train_y.squeeze()
+        for label, (thr, band_size) in coverage_bands.items():
+            n_hit = int((flat >= thr.to(flat.device)).sum().item())
+            wandb.log({f"train/coverage_top{label}": n_hit / band_size, "epoch": epoch})
+
     for i in tqdm(range(n_iters), colour="blue"):
         train_x = dm.train_x.clone().to("cuda")
         train_y = dm.train_y.clone().to("cuda")
@@ -283,6 +303,7 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
         x_next = torch.stack(x_next)
 
         log_bo_metrics(data_stats, dm.train_y, epoch=i)
+        _log_train_coverage(i)
 
         matches = (design_space.unsqueeze(0).to("cuda") == x_next).all(dim=-1)
         indices = matches.nonzero(as_tuple=True)[1].to("cpu")
@@ -337,6 +358,7 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
         assert total_indices == len(dm.x), "Mismatch in the total number of indices"
 
     log_bo_metrics(data_stats, dm.train_y, epoch=n_iters)
+    _log_train_coverage(n_iters)
 
 
 def _build_phase2_seed(config, dm, seed_source, seed_size, device):
@@ -482,7 +504,7 @@ def run_phase2(config, dm, bo, n_iters, epoch_offset=0,
         design_x = design_x[keep]
         design_y = design_y[keep]
 
-        _log_metrics(epoch_offset + 1 + i, new_y)
+        _log_metrics(epoch_offset + i, new_y)
 
     final_best = acquired_test_y.max().item() if acquired_test_y.numel() else float("nan")
     print(
@@ -525,6 +547,11 @@ def train(config):
 
     if config.get("init_method", None) is not None:
         config["data"]["init_args"]["initializer"]["init_args"]["method"] = config["init_method"]
+
+    if config.get("kernel", None) is not None:
+        if "init_args" not in config["surrogate_model"]:
+            config["surrogate_model"]["init_args"] = {}
+        config["surrogate_model"]["init_args"]["kernel"] = config["kernel"]
 
     config = validate_configuration(config)
     wandb_config = flatten(config)
