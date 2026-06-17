@@ -99,7 +99,7 @@ def _structured(seqs, consensus, aggregate="sum"):
 
 def get_mutation_context_features(
     texts, model_name=None, pooling_method="average", mc_aggregate="sum",
-    mc_delta=True, mc_structured=True,
+    mc_delta=True, mc_structured=True, consensus_override=None,
 ):
     """Mutation-context features vs a per-dataset consensus wild-type.
 
@@ -113,6 +113,11 @@ def get_mutation_context_features(
     These two flags enable the 2x2 decomposition {plain | Delta} x {±structured}
     that separates the value of the reference-relative framing from the structured
     channel. ``mc_aggregate`` ("sum" | "mean") controls structured aggregation.
+
+    ``consensus_override``: when given (a sequence string), use it as the reference
+    wild-type instead of computing the consensus over ``texts``. The data module
+    passes the TRAIN-only consensus here so the reference frame never sees the test
+    split. The same reference is used for both the structured and Delta channels.
     """
     if mc_aggregate not in ("sum", "mean"):
         raise ValueError(f"mc_aggregate must be 'sum' or 'mean', got '{mc_aggregate}'.")
@@ -122,7 +127,7 @@ def get_mutation_context_features(
             "Enable mc_structured or provide model_name."
         )
     seqs = texts.tolist() if hasattr(texts, "tolist") else list(texts)
-    consensus = _consensus(seqs)
+    consensus = consensus_override if consensus_override is not None else _consensus(seqs)
 
     channels, dims = [], []
     if mc_structured:

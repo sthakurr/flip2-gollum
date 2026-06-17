@@ -112,8 +112,9 @@ def log_surrogate_eval(posterior, y, stage="test", ks=(1, 3, 5, 10), epoch=0):
 def _embed_for_kernel(model, x):
     """Map raw inputs into the space the kernel actually acts on.
 
-    DeepGP: push through the trained feature map (finetuning_model + the same
-    embed_norm / scale_to_bounds applied in ``forward``). Plain GP: apply the
+    DeepGP: push through the trained feature map (finetuning_model) and apply
+    the same normalization ``forward`` applies before the kernel, so the kernel
+    is evaluated in the space its lengthscales were fit in. Plain GP: apply the
     BoTorch input transform (Normalize). Returns a detached tensor on the
     kernel's device.
     """
@@ -121,8 +122,10 @@ def _embed_for_kernel(model, x):
     with torch.no_grad():
         if getattr(model, "finetuning_model", None) is not None:
             emb = model.finetuning_model(x)
-            if getattr(model, "embed_norm", None) is not None:
-                emb = model.embed_norm(emb)
+            if getattr(model, "normalise_embeddings", False):
+                mean, std = model._embed_mean, model._embed_std
+                if mean is not None and std is not None:
+                    emb = (emb - mean) / std
             elif getattr(model, "scale_embeddings", False):
                 emb = model.scale_to_bounds(emb)
         elif hasattr(model, "transform_inputs"):
@@ -130,6 +133,18 @@ def _embed_for_kernel(model, x):
         else:
             emb = x
     return emb
+
+
+def _base_kernel_lengthscale(covar_module):
+    """Mean fitted lengthscale of the (possibly ScaleKernel-wrapped, possibly
+    ARD) base kernel. Returns a float, or None if no lengthscale is exposed.
+    """
+    ls = getattr(getattr(covar_module, "base_kernel", None), "lengthscale", None)
+    if ls is None:
+        ls = getattr(covar_module, "lengthscale", None)
+    if ls is None:
+        return None
+    return ls.detach().float().mean().item()
 
 
 def log_prior_correlation(
@@ -185,11 +200,26 @@ def log_prior_correlation(
     rho_tr = torch.cat(rho_tr)
     rho_te = torch.cat(rho_te)
     far_all = torch.cat([torch.cat(far_tr), torch.cat(far_te)])
+
+    iu = torch.triu_indices(dist.shape[0], dist.shape[1], offset=1)
+    median_dist = dist[iu[0], iu[1]].median().item()
+    lengthscale = _base_kernel_lengthscale(model.covar_module)
+    ratio = lengthscale / median_dist if (lengthscale and median_dist) else float("nan")
+
     summary = {
         f"prior_corr/{stage}/rho_train_mean": rho_tr.mean().item(),
         f"prior_corr/{stage}/rho_test_mean": rho_te.mean().item(),
         f"prior_corr/{stage}/rho_far_absmean": far_all.abs().mean().item(),
+        f"prior_corr/{stage}/lengthscale_mean": lengthscale,
+        f"prior_corr/{stage}/median_dist": median_dist,
+        f"prior_corr/{stage}/lengthscale_over_dist": ratio,
     }
+    print(
+        f"[prior_corr/{stage}] fitted lengthscale={lengthscale:.3g}, "
+        f"median pairwise dist={median_dist:.3g}, ratio={ratio:.3g} "
+        f"({'OVER-SMOOTHING' if ratio > 2 else 'ok'}); "
+        f"rho_far_absmean={summary[f'prior_corr/{stage}/rho_far_absmean']:.3g}"
+    )
 
     if wandb.run is not None:
         log = {**summary, "epoch": epoch}

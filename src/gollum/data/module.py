@@ -97,6 +97,22 @@ class BaseDataModule(pl.LightningDataModule, ABC):
             self.data[self.target_column] = -self.data[self.target_column]
 
     def featurize_data(self):
+        # Train-only reference for mutation featurizers. featurize_data runs
+        # BEFORE the split while the `set` column is still present, so we can
+        # compute the consensus on TRAIN rows only and inject it — the reference
+        # frame then never sees the test split. featurize() filters params by
+        # signature, so this only reaches featurizers that accept it.
+        if (
+            self.respect_split
+            and self.split_column in self.data
+            and self.featurizer.representation in ("mutation_context",)
+        ):
+            from gollum.featurization.mutation import _consensus
+
+            train_mask = np.asarray(self.data[self.split_column]) == "train"
+            train_seqs = self.data[self.input_column][train_mask].tolist()
+            self.featurizer.params["consensus_override"] = _consensus(train_seqs)
+
         x = self.featurizer.featurize(self.data[self.input_column])
         y = self.data[self.target_column].values
 

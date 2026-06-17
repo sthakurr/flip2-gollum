@@ -156,7 +156,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
             device=torch.device("cuda"), dtype=torch.float32
         )
 
-    def get_embeddings(self, x, batch_size=32):
+    def get_embeddings(self, x, batch_size=48):
         torch.cuda.empty_cache()
 
         x = x.to(dtype=torch.float32)
