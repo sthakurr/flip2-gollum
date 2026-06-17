@@ -265,9 +265,7 @@ def run_gate(config, dm, bo):
     metrics = log_surrogate_eval(
         posterior, test_y, stage="test", epoch=config.get("n_iters", 0)
     )
-    # Ober-style prior-correlation diagnostic: how does a random train point
-    # correlate with other train points vs test points under the fitted kernel?
-    # Comment out when not needed.
+
     log_prior_correlation(
         bo.surrogate_model, train_x, test_x, stage="test",
         epoch=config.get("n_iters", 0),
@@ -283,9 +281,6 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
     space (the remaining train pool when respect_split is set)."""
     n_iters = n_iters if n_iters is not None else config["n_iters"]
 
-    # Top-q% coverage over the TRAIN pool only (seed + heldout design space),
-    # fixed at the start of Phase-1. Tracks what fraction of the top-q% training
-    # points the BO has pulled into the observed train set each iteration.
     full_train_x = torch.cat([dm.train_x, dm.heldout_x], dim=0)
     full_train_y = torch.cat([dm.train_y, dm.heldout_y], dim=0)
     train_pool_stats = calculate_data_stats(full_train_x, full_train_y)

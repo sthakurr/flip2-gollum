@@ -82,13 +82,10 @@ class GP(SurrogateModel, SingleTaskGP):
             "raw_noise", GreaterThan(noise_constraint)
         )
 
-        hypers = {
-            "likelihood.noise_covar.noise": torch.tensor(initial_noise_val),
-            "covar_module.base_kernel.lengthscale": torch.tensor(
-                initial_lengthscale_val
-            ),
-            "covar_module.outputscale": torch.tensor(initial_outputscale_val),
-        }
+        hypers = {"likelihood.noise_covar.noise": torch.tensor(initial_noise_val)}
+        if kernel is None:
+            hypers["covar_module.base_kernel.lengthscale"] = torch.tensor(initial_lengthscale_val)
+            hypers["covar_module.outputscale"] = torch.tensor(initial_outputscale_val)
 
         existing_parameters = {name for name, _ in self.named_parameters()}
         print(f"Existing parameters in the model: {existing_parameters}")
@@ -208,12 +205,13 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         gp_step_lr: float = 0.95,
         wd: float = 1e-3,
         wd_llm: float = 1e-3,
+        normalise_embeddings: bool = True,
         scale_embeddings: bool = False,
         train_mll_additionally: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
         embedding_norm: str = "scale_to_bounds",
         kernel: Union[str, None] = None,
-        max_fit_iter: int = 50,
+        max_fit_iter: int = 1000,
     ) -> None:
 
         tkwargs = {
@@ -237,9 +235,6 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.train_x = train_x
         self.train_y = train_y
 
-        # The kernel/normalization act on the finetuning model's OUTPUT (the
-        # projection if present, else the raw LLM embedding) — NOT on train_x
-        # (tokens). Size any default kernel and the LayerNorm to that dimension.
         ft_out_dim = (
             finetuning_model.projection_dim
             if getattr(finetuning_model, "projection_dim", None)
@@ -247,9 +242,6 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         )
 
         if covar_module is None:
-            # Build the kernel sized to the finetuning OUTPUT dim (ft_out_dim),
-            # NOT train_x (tokens). Defaults to the dimension-scaled Hvarfner
-            # prior to preserve prior behavior when `kernel` is unspecified.
             covar_module = build_covar_module(kernel or "matern_hvarfner", dim=ft_out_dim)
         if mean_module is None:
             mean_module = ConstantMean()
@@ -257,15 +249,9 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.mean_module = mean_module
         self.covar_module = covar_module
 
-        # Optional per-dim normalization of the embedding before the kernel.
-        # "layernorm" gives ~unit per-dim scale (the precondition for the
-        # dimension-scaled prior); "scale_to_bounds" only bounds the global range.
-        self.embedding_norm = embedding_norm
-        self.embed_norm = (
-            torch.nn.LayerNorm(ft_out_dim).to(**tkwargs)
-            if embedding_norm == "layernorm"
-            else None
-        )
+        self.normalise_embeddings = normalise_embeddings
+        self.register_buffer("_embed_mean", None)
+        self.register_buffer("_embed_std", None)
 
         self.finetuning_model = finetuning_model
         self.finetuning_model = self.finetuning_model.to(**tkwargs)
@@ -273,13 +259,11 @@ class DeepGP(SurrogateModel, SingleTaskGP):
             "raw_noise", GreaterThan(noise_constraint)
         )
 
-        hypers = {
-            "likelihood.noise_covar.noise": torch.tensor(initial_noise_val),
-            "covar_module.base_kernel.lengthscale": torch.tensor(
-                initial_lengthscale_val
-            ),
-            "covar_module.outputscale": torch.tensor(initial_outputscale_val),
-        }
+        # When a kernel string is provided, build_covar_module already sets lengthscale/outputscale to their dimension-aware values.
+        hypers = {"likelihood.noise_covar.noise": torch.tensor(initial_noise_val)}
+        if kernel is None:
+            hypers["covar_module.base_kernel.lengthscale"] = torch.tensor(initial_lengthscale_val)
+            hypers["covar_module.outputscale"] = torch.tensor(initial_outputscale_val)
 
         existing_parameters = {name for name, _ in self.named_parameters()}
         hypers_to_use = {
@@ -305,8 +289,15 @@ class DeepGP(SurrogateModel, SingleTaskGP):
 
     def forward(self, x):
         finetuned = self.finetuning_model(x)
-        if self.embed_norm is not None:
-            finetuned = self.embed_norm(finetuned)
+        if self.normalise_embeddings:
+            if self.training:
+                mean = finetuned.mean(dim=0, keepdim=True)
+                std = finetuned.std(dim=0, keepdim=True).clamp_min(1e-8)
+                self._embed_mean = mean.detach()
+                self._embed_std = std.detach()
+            else:
+                mean, std = self._embed_mean, self._embed_std
+            finetuned = (finetuned - mean) / std
         elif self.scale_embeddings:
             finetuned = self.scale_to_bounds(finetuned)
         self.finetuned = finetuned
@@ -371,12 +362,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
                 {"params": self.covar_module.parameters()},
                 {"params": self.mean_module.parameters()},
                 {"params": self.likelihood.parameters()},
-            ]
-            + (
-                [{"params": self.embed_norm.parameters()}]
-                if self.embed_norm is not None
-                else []
-            ),
+            ],
             lr=self.gp_lr,
             weight_decay=self.wd,
         )

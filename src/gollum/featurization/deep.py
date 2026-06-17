@@ -156,7 +156,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
             device=torch.device("cuda"), dtype=torch.float32
         )
 
-    def get_embeddings(self, x, batch_size=4):
+    def get_embeddings(self, x, batch_size=32):
         torch.cuda.empty_cache()
 
         x = x.to(dtype=torch.float32)
@@ -175,12 +175,6 @@ class LLMFeaturizer(BaseNNFeaturizer):
             input_ids = x[start_idx:end_idx, :ids_split].long()
             attn_mask = x[start_idx:end_idx, ids_split:].long()
 
-            # Three-way forward dispatch:
-            #  - ESM-C: forward takes sequence_tokens (no attention_mask kwarg).
-            #  - encoder-decoder (e.g. T5): run only the encoder stack.
-            #  - plain HF encoder (e.g. ESM2): standard input_ids/attention_mask.
-            # Non-HF backbones (ESM-C) have no `.config`; guard the access so
-            # getattr's default applies (self.llm.config itself would raise).
             _config = getattr(self.llm, "config", None)
             is_enc_dec = getattr(_config, "is_encoder_decoder", False)
 
@@ -193,8 +187,6 @@ class LLMFeaturizer(BaseNNFeaturizer):
 
             if self.trainable:
                 if self._uses_esmc and self.gradient_checkpointing:
-                    # Manual gradient checkpointing for ESM-C (recompute
-                    # activations on backward instead of storing them).
                     outputs = grad_checkpoint(
                         lambda t: _run(t, attn_mask), input_ids, use_reentrant=False
                     )
