@@ -1,14 +1,12 @@
 from typing import Any, Dict, Optional
 from gollum.data.utils import torch_delete_rows
 from gollum.utils.config import instantiate_class
-from torch import Tensor
 import torch
 import warnings
 
 class BotorchOptimizer:
     def __init__(
         self,
-        design_space: Optional[Tensor] = None,
         surrogate_model_config: Optional[Dict[str, Any]] = None,
         acq_function_config: Optional[Dict[str, Any]] = None,
         batch_strategy: str = "kriging",
@@ -19,7 +17,6 @@ class BotorchOptimizer:
         },
     ):
 
-        self.design_space = design_space
         self.surrogate_model_config = (
             surrogate_model_config or BotorchOptimizer.default_surrogate_model_config()
         )

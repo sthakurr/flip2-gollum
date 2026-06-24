@@ -1,9 +1,5 @@
-"""Protein-sequence featurizers that don't require a neural model.
+"""Protein-sequence featurizers that don't require a neural model."""
 
-Currently provides one-hot encoding. Kept separate from ``text.py`` (which loads
-HuggingFace models) so the lightweight baseline has no heavy import cost, and
-separate from ``utils/analysis.py`` (which pulls in matplotlib).
-"""
 import numpy as np
 
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"

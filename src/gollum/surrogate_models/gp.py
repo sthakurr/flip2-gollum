@@ -60,10 +60,15 @@ class GP(SurrogateModel, SingleTaskGP):
         initial_lengthscale_val: float = 1.0,
         gp_lr: float = 0.2,
         kernel: Union[str, None] = None,
+        kernel_apply_prior: bool = False,
+        kernel_init_large: bool = False,
     ) -> None:
 
         if covar_module is None and kernel is not None:
-            covar_module = build_covar_module(kernel, dim=train_x.shape[-1])
+            covar_module = build_covar_module(
+                kernel, dim=train_x.shape[-1],
+                apply_prior=kernel_apply_prior, init_large=kernel_init_large,
+            )
 
         super().__init__(
             train_X=train_x,
@@ -105,10 +110,17 @@ class GP(SurrogateModel, SingleTaskGP):
         mll = ExactMarginalLogLikelihood(self.likelihood, self)
         mll.train()
         mll = mll.to(self.train_x)
-        
+
+        if wandb.run is not None:
+            with torch.no_grad():
+                kx = self.transform_inputs(self.train_x)
+                wandb.log({
+                    "embed/median_pairwise_dist": torch.pdist(kx).median().item(),
+                    "fit_step": 0,
+                })
 
         try:
-            
+
             fit_gpytorch_mll(
                 mll
             )
@@ -205,12 +217,15 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         gp_step_lr: float = 0.95,
         wd: float = 1e-3,
         wd_llm: float = 1e-3,
-        normalise_embeddings: bool = True,
+        normalise_embeddings: bool = False,
         scale_embeddings: bool = False,
+        minmax_embeddings: bool = False,
         train_mll_additionally: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
         embedding_norm: str = "scale_to_bounds",
         kernel: Union[str, None] = None,
+        kernel_apply_prior: bool = True,
+        kernel_init_large: bool = True,
         max_fit_iter: int = 1000,
     ) -> None:
 
@@ -242,7 +257,10 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         )
 
         if covar_module is None:
-            covar_module = build_covar_module(kernel or "matern_hvarfner", dim=ft_out_dim)
+            covar_module = build_covar_module(
+                kernel or "matern_hvarfner", dim=ft_out_dim,
+                apply_prior=kernel_apply_prior, init_large=kernel_init_large,
+            )
         if mean_module is None:
             mean_module = ConstantMean()
 
@@ -250,8 +268,11 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.covar_module = covar_module
 
         self.normalise_embeddings = normalise_embeddings
+        self.minmax_embeddings = minmax_embeddings
         self.register_buffer("_embed_mean", None)
         self.register_buffer("_embed_std", None)
+        self.register_buffer("_embed_min", None)
+        self.register_buffer("_embed_range", None)
 
         self.finetuning_model = finetuning_model
         self.finetuning_model = self.finetuning_model.to(**tkwargs)
@@ -285,11 +306,29 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.train_mll_additionally = train_mll_additionally
         self.max_fit_iter = max_fit_iter
 
+        if not (self.normalise_embeddings or self.scale_embeddings or self.minmax_embeddings):
+            if (kernel or "matern_hvarfner") in ("matern_stuyver", "matern_hvarfner"):
+                self.minmax_embeddings = True
+            else:
+                self.scale_embeddings = True
+
         self.to_gpu()
 
     def forward(self, x):
         finetuned = self.finetuning_model(x)
-        if self.normalise_embeddings:
+        if self.minmax_embeddings:
+            # Per-dim min-max to [0,1]^d (unit hypercube) — the input scale the
+            # dimension-aware priors (stuyver/hvarfner) assume. Fit on the train
+            # batch, stored, reused at eval.
+            if self.training:
+                mn = finetuned.min(dim=0, keepdim=True).values
+                rng = (finetuned.max(dim=0, keepdim=True).values - mn).clamp_min(1e-8)
+                self._embed_min = mn.detach()
+                self._embed_range = rng.detach()
+            else:
+                mn, rng = self._embed_min, self._embed_range
+            finetuned = (finetuned - mn) / rng
+        elif self.normalise_embeddings:
             if self.training:
                 mean = finetuned.mean(dim=0, keepdim=True)
                 std = finetuned.std(dim=0, keepdim=True).clamp_min(1e-8)
@@ -309,6 +348,21 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         wandb.log({"lr/gp_lr": self.optimizer.param_groups[1]["lr"]})
 
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+
+    def _kernel_input(self):
+        """Projected + normalised train embeddings — the space the kernel sees."""
+        emb = self.finetuning_model(self.train_x)
+        if self.minmax_embeddings:
+            mn = emb.min(dim=0, keepdim=True).values
+            rng = (emb.max(dim=0, keepdim=True).values - mn).clamp_min(1e-8)
+            emb = (emb - mn) / rng
+        elif self.normalise_embeddings:
+            mean = emb.mean(dim=0, keepdim=True)
+            std = emb.std(dim=0, keepdim=True).clamp_min(1e-8)
+            emb = (emb - mean) / std
+        elif self.scale_embeddings:
+            emb = self.scale_to_bounds(emb)
+        return emb
 
     def to_gpu(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -348,6 +402,19 @@ class DeepGP(SurrogateModel, SingleTaskGP):
                 flush=True,
             )
             _dbg["t_prev"] = _now
+            # Embedding spread this step (reuse forward's output); shrinking
+            # across steps ⇒ feature collapse (Ober DKL pathology).
+            # Lengthscale/outputscale track kernel saturation: collapse onset
+            # should coincide with the lengthscale entering the large regime.
+            base = getattr(self.covar_module, "base_kernel", self.covar_module)
+            log = {
+                "embed/median_pairwise_dist": torch.pdist(self.finetuned.detach()).median().item(),
+                "kernel/lengthscale_mean": base.lengthscale.detach().mean().item(),
+                "fit_step": _dbg["step"],
+            }
+            if hasattr(self.covar_module, "outputscale"):
+                log["kernel/outputscale"] = self.covar_module.outputscale.detach().mean().item()
+            wandb.log(log)
             return mll_loss, grads
 
         self.optimizer = torch.optim.AdamW(
@@ -369,6 +436,13 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         
         scheduler = StepLR(self.optimizer, step_size=1, gamma=0.95)
         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+
+        # Baseline embedding spread before any training step (fit_step=0).
+        with torch.no_grad():
+            wandb.log({
+                "embed/median_pairwise_dist": torch.pdist(self._kernel_input()).median().item(),
+                "fit_step": 0,
+            })
 
         # total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         # print(f"Total number of parameters: {total_params}")

@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, List
 from peft import LoraConfig, get_peft_model
 from gollum.featurization.utils.pooling import average_pool, last_token_pool, weighted_average_pool
-from gollum.featurization.text import get_model_and_tokenizer
+from gollum.featurization.text import get_model_and_tokenizer, _esmc_pool
 from gollum.featurization.utils.layers import get_target_layers
 from torch.nn import init
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
@@ -156,7 +156,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
             device=torch.device("cuda"), dtype=torch.float32
         )
 
-    def get_embeddings(self, x, batch_size=48):
+    def get_embeddings(self, x, batch_size=16):
         torch.cuda.empty_cache()
 
         x = x.to(dtype=torch.float32)
@@ -202,7 +202,9 @@ class LLMFeaturizer(BaseNNFeaturizer):
             )
 
             if self.pooling_method == "average":
-                pooled = average_pool(last_hidden_state, attn_mask)
+                pooled = (_esmc_pool(last_hidden_state, attn_mask, "average")
+                          if self._uses_esmc
+                          else average_pool(last_hidden_state, attn_mask))
             elif self.pooling_method == "cls":
                 pooled = last_hidden_state[:, 0]
             elif self.pooling_method == "last_token_pool":

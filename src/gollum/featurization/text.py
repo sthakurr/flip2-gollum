@@ -30,6 +30,7 @@ from InstructorEmbedding import INSTRUCTOR
 
 from transformers import AutoTokenizer
 from gollum.featurization.utils.pooling import average_pool, last_token_pool, weighted_average_pool
+from gollum.featurization.mutation import _consensus
 
 
 
@@ -155,6 +156,7 @@ def get_tokens(
     texts,
     model_name="WhereIsAI/UAE-Large-V1",
     batch_size=32,
+    max_length=None,
     device="cuda" if torch.cuda.is_available() else "cpu",
 ):
     print(model_name, "for get tokens")
@@ -203,8 +205,8 @@ def get_tokens(
     encoded_input = tokenizer(
         texts,
         padding=True,
-        truncation=True,
-        max_length=512,
+        truncation=max_length is not None,
+        max_length=max_length,
         return_tensors="pt",
     ).to(device)
 
@@ -227,6 +229,7 @@ def get_tokens(
 def get_huggingface_embeddings(
     texts,
     model_name="tiiuae/falcon-7b",
+    wt_ref=False,
     max_length=512,
     batch_size=16,
     pooling_method="cls",
@@ -236,17 +239,22 @@ def get_huggingface_embeddings(
     use_cache=True,
 ):
     """
-    General function to get embeddings from a HuggingFace transformer model.
+    General function to get embeddings from a HuggingFace transformer model. \
+    Takes in a wt_ref argument to optionally use a wild-type sequence 
+    as a reference to each input, which can help with small-mutation protein datasets. \
 
     Embeddings depend only on (sequences, model, pooling, prefix, max_length,
     normalize) — not on the BO seed — so they are cached to disk and reused
     across seeds/modes/re-runs. Inference uses bf16 autocast on CUDA for speed.
     """
+    if max_length is None:
+        max_length = 512
     texts = list(texts)
+    wt_seq = _consensus(texts) if wt_ref else None
     cache = (
         _cache_path(
             f"hf_{model_name}_{pooling_method}_L{max_length}"
-            f"_norm{int(normalize_embeddings)}_pre{prefix}",
+            f"_norm{int(normalize_embeddings)}_pre{prefix}_wtref{int(wt_ref)}",
             texts,
         )
         if use_cache
@@ -264,6 +272,8 @@ def get_huggingface_embeddings(
     # ProtT5 requires space-separated amino acids
     if "prot_t5" in model_name.lower():
         texts = [" ".join(list(seq)) for seq in texts]
+        if wt_seq is not None:
+            wt_seq = " ".join(list(wt_seq))
 
     # optionally add prefix to each text
     if prefix:
@@ -277,11 +287,11 @@ def get_huggingface_embeddings(
     }
 
     autocast_enabled = device == "cuda" or (hasattr(device, "type") and device.type == "cuda")
+    is_encoder_decoder = getattr(model.config, "is_encoder_decoder", False)
     embeddings_list = []
-    for i in tqdm(
-        range(0, len(texts), batch_size), desc=f"Processing with {model_name}"
-    ):
-        batch_texts = texts[i : i + batch_size]
+
+    def _forward_pooled(batch_texts):
+        """Tokenize, run the encoder, and pool a batch of sequences to ``(B, D)``."""
         encoded_input = tokenizer(
             batch_texts,
             padding=True,
@@ -289,17 +299,30 @@ def get_huggingface_embeddings(
             max_length=max_length,
             return_tensors="pt",
         ).to(device)
-
         with torch.inference_mode(), torch.autocast(
             device_type="cuda", dtype=torch.bfloat16, enabled=autocast_enabled
         ):
-            if getattr(model.config, "is_encoder_decoder", False):
-                outputs = model.encoder(**encoded_input)
-            else:
-                outputs = model(**encoded_input)
-            pooled = pooling_functions[pooling_method](
+            outputs = (
+                model.encoder(**encoded_input)
+                if is_encoder_decoder
+                else model(**encoded_input)
+            )
+            return pooling_functions[pooling_method](
                 outputs.last_hidden_state, encoded_input["attention_mask"]
             )
+
+    wt_pooled = _forward_pooled([wt_seq]) if wt_ref else None
+
+    for i in tqdm(
+        range(0, len(texts), batch_size), desc=f"Processing with {model_name}"
+    ):
+        batch_texts = texts[i : i + batch_size]
+        with torch.inference_mode(), torch.autocast(
+            device_type="cuda", dtype=torch.bfloat16, enabled=autocast_enabled
+        ):
+            pooled = _forward_pooled(batch_texts)
+            if wt_ref:
+                pooled = wt_pooled - pooled  # WT - mutant, (1, D) - (B, D)
             if normalize_embeddings:
                 pooled = F.normalize(pooled, p=2, dim=1)
         # bf16 -> float32 (numpy has no bf16); also frees the autocast graph.

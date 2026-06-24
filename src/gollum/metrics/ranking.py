@@ -6,6 +6,8 @@ These complement the regression/calibration metrics in ``model_metrics.py``
 actually matter for Bayesian Optimization: we care whether the surrogate ranks
 the high performers above the rest, not its absolute error.
 """
+import math
+
 import numpy as np
 import torch
 from scipy.stats import spearmanr, kendalltau
@@ -122,7 +124,11 @@ def _embed_for_kernel(model, x):
     with torch.no_grad():
         if getattr(model, "finetuning_model", None) is not None:
             emb = model.finetuning_model(x)
-            if getattr(model, "normalise_embeddings", False):
+            if getattr(model, "minmax_embeddings", False):
+                mn, rng = getattr(model, "_embed_min", None), getattr(model, "_embed_range", None)
+                if mn is not None and rng is not None:
+                    emb = (emb - mn) / rng
+            elif getattr(model, "normalise_embeddings", False):
                 mean, std = model._embed_mean, model._embed_std
                 if mean is not None and std is not None:
                     emb = (emb - mean) / std
@@ -202,9 +208,20 @@ def log_prior_correlation(
     far_all = torch.cat([torch.cat(far_tr), torch.cat(far_te)])
 
     iu = torch.triu_indices(dist.shape[0], dist.shape[1], offset=1)
-    median_dist = dist[iu[0], iu[1]].median().item()
+    all_pair_dist = dist[iu[0], iu[1]]
+    median_dist = all_pair_dist.median().item()
+    # Gate-relevant scale: for each test point, its distance to the NEAREST
+    # train point (this, not the global median, governs train->test prediction).
+    tt_block = dist[:n_tr, n_tr:]  # (n_train, n_test)
+    nn_test_to_train = tt_block.min(dim=0).values if tt_block.numel() else dist.new_empty(0)
+    median_nn_dist = nn_test_to_train.median().item() if nn_test_to_train.numel() else float("nan")
     lengthscale = _base_kernel_lengthscale(model.covar_module)
     ratio = lengthscale / median_dist if (lengthscale and median_dist) else float("nan")
+    nn_ratio = (
+        lengthscale / median_nn_dist
+        if (lengthscale and median_nn_dist and not math.isnan(median_nn_dist))
+        else float("nan")
+    )
 
     summary = {
         f"prior_corr/{stage}/rho_train_mean": rho_tr.mean().item(),
@@ -212,12 +229,15 @@ def log_prior_correlation(
         f"prior_corr/{stage}/rho_far_absmean": far_all.abs().mean().item(),
         f"prior_corr/{stage}/lengthscale_mean": lengthscale,
         f"prior_corr/{stage}/median_dist": median_dist,
+        f"prior_corr/{stage}/median_nn_dist": median_nn_dist,
         f"prior_corr/{stage}/lengthscale_over_dist": ratio,
+        f"prior_corr/{stage}/lengthscale_over_nn_dist": nn_ratio,
     }
     print(
         f"[prior_corr/{stage}] fitted lengthscale={lengthscale:.3g}, "
         f"median pairwise dist={median_dist:.3g}, ratio={ratio:.3g} "
         f"({'OVER-SMOOTHING' if ratio > 2 else 'ok'}); "
+        f"median test->NN-train dist={median_nn_dist:.3g}, nn_ratio={nn_ratio:.3g}; "
         f"rho_far_absmean={summary[f'prior_corr/{stage}/rho_far_absmean']:.3g}"
     )
 
@@ -227,6 +247,11 @@ def log_prior_correlation(
             rho_tr.numpy()
         )
         log[f"prior_corr/{stage}/rho_test_hist"] = wandb.Histogram(rho_te.numpy())
+        log[f"prior_corr/{stage}/dist_hist"] = wandb.Histogram(all_pair_dist.numpy())
+        if nn_test_to_train.numel():
+            log[f"prior_corr/{stage}/nn_dist_hist"] = wandb.Histogram(
+                nn_test_to_train.numpy()
+            )
         sc_d = torch.cat(sc_d).numpy()
         sc_r = torch.cat(sc_r).numpy()
         table = wandb.Table(

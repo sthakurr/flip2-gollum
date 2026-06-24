@@ -912,3 +912,12 @@ embeddings_cache/
 
 jobs/
 configs/
+
+.agents/
+skills-lock.json
+
+scripts/analysis/
+
+plots/
+figures/
+data/

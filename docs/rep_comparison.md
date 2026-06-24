@@ -50,11 +50,12 @@ Decisions baked into the configs, from our discussion:
 - **Standardize the outcomes (`y`)** — always, regardless of representation.
   Makes the outputscale/noise priors meaningful and the marginal likelihood
   well-conditioned. (`standardize: true` on every arm.)
-- **Per-dimension input standardization** for embeddings — the precondition that
+- **Per-dimension input normalisation** for embeddings — the precondition that
   makes BoTorch's **dimension-scaled lengthscale prior** valid. The prior depends
-  only on `d` *because* it assumes each feature is on a unit scale; standardizing
-  is what makes "typical pairwise distance ≈ √(2d)" true.
-  (`normalize_input: standard_scaling_per_dim`.)
+  only on `d` *because* it assumes each feature is on a unit scale; min-max scaling
+  each feature to [0, 1] (over the complete candidate set) is what makes "typical
+  pairwise distance ≈ √(2d)" true.
+  (`normalize_input: per_dim_normalisation`.)
 - **PCA to the effective dimension** for ESM2 — embeddings have effective
   dimensionality ≪ 1280 (highly correlated dims), so the `√d` prior on the
   nominal 1280 over-estimates the lengthscale. PCA gives the prior an honest `d`
@@ -92,8 +93,9 @@ Decisions baked into the configs, from our discussion:
   - `respect_split` / `split_column` — Phase-1 sample drawn only from `set==train`,
     held-out design space = `set==test` (`_split_by_set`). Falls back to the old
     behavior when unset.
-  - `normalize_data` — added `standard_scaling_per_dim` and optional PCA
-    (`reduce_dim`), both fit on **train rows only** to avoid test leakage.
+  - `normalize_data` — added `per_dim_normalisation` (per-dim min-max to [0,1] using
+    bounds over the **complete candidate set**) and optional PCA (`reduce_dim`, fit on
+    **train rows only** to avoid test leakage).
   - `test_subsample` — optional cap on huge test design spaces.
 - `src/gollum/featurization/base.py` — registered `onehot`, `get_esmc_embeddings`,
   `get_esmc_sae_features`; added `sae_weights_path` passthrough.

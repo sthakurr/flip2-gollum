@@ -19,10 +19,12 @@ class Featurizer:
         model_name: Optional[str] = None,
         pooling_method: Optional[str] = None,
         normalize_embeddings: bool = False,
+        wt_ref: bool = False,
         sae_weights_path: Optional[str] = None,
         mc_aggregate: str = "sum",
         mc_delta: bool = True,
         mc_structured: bool = True,
+        max_length: Optional[int] = None,
     ):
         self.representation = representation
 
@@ -32,10 +34,12 @@ class Featurizer:
             "model_name": model_name,
             "pooling_method": pooling_method,
             "normalize_embeddings": normalize_embeddings,
+            "wt_ref": wt_ref,
             "sae_weights_path": sae_weights_path,
             "mc_aggregate": mc_aggregate,
             "mc_delta": mc_delta,
             "mc_structured": mc_structured,
+            "max_length": max_length,
         }
         self._featurization_registry = self._build_registry()
         self._output_dim = None

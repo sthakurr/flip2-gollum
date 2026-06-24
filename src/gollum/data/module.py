@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from gollum.data.dataset import SingleSampleDataset
 from gollum.data.utils import torch_delete_rows
 from gollum.initialization.initializers import BOInitializer
+from gollum.featurization.mutation import _consensus
 from gollum.data.utils import find_duplicates, find_nan_rows
 from gollum.featurization.base import Featurizer
 from sklearn.decomposition import PCA
@@ -43,7 +44,7 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         featurizer: Featurizer object to convert reaction representations into feature vectors.
         initializer: BOInitializer object to select the initial sample; if None, defaults to random sampling.
         exclude_top: Whether to exclude the top-performing reactions from the initial sample.
-        normalize_input: Method for normalizing input features; options include "standard_scaling", "standard_scaling_per_dim", "l2_max_scaling", "l2_normalize", or "original" (no normalization).
+        normalize_input: Method for normalizing input features; options include "standard_scaling", "per_dim_normalisation" (per-dim min-max to [0,1] using bounds over the complete candidate set), "l2_max_scaling", "l2_normalize", or "original" (no normalization).
         respect_split: Whether to respect a train/test split defined in the data; if True, the initial sample is drawn only from "train" rows and "test" rows are held aside for evaluation.
         split_column: Name of the column defining the train/test split; only used if respect_split is True.
         reduce_dim: Optional PCA reduction (int n_components or float variance fraction), fit on train rows to avoid test leakage; only applied if not None.
@@ -85,7 +86,6 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         # Optional PCA reduction (int n_components or float variance fraction),
         # fit on train rows to avoid test leakage.
         self.reduce_dim = reduce_dim
-        print(f"reduce_dim: {self.reduce_dim}")
         # Optional cap on the test design space for very large test splits.
         self.test_subsample = test_subsample
         self.maximize = maximize
@@ -97,17 +97,11 @@ class BaseDataModule(pl.LightningDataModule, ABC):
             self.data[self.target_column] = -self.data[self.target_column]
 
     def featurize_data(self):
-        # Train-only reference for mutation featurizers. featurize_data runs
-        # BEFORE the split while the `set` column is still present, so we can
-        # compute the consensus on TRAIN rows only and inject it — the reference
-        # frame then never sees the test split. featurize() filters params by
-        # signature, so this only reaches featurizers that accept it.
         if (
             self.respect_split
             and self.split_column in self.data
             and self.featurizer.representation in ("mutation_context",)
         ):
-            from gollum.featurization.mutation import _consensus
 
             train_mask = np.asarray(self.data[self.split_column]) == "train"
             train_seqs = self.data[self.input_column][train_mask].tolist()
@@ -265,9 +259,6 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         return torch.from_numpy(np.where(mask)[0])
 
     def normalize_data(self):
-        def standard_scaling(X):
-            return (X - X.mean()) / X.std()
-
         def l2_max_scaling(X):
             return X / torch.norm(X, dim=1).max()
 
@@ -277,13 +268,19 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         fit_idx = self._fit_rows()
 
         if self.normalize_input == "standard_scaling":
-            self.x = standard_scaling(self.x)
-        elif self.normalize_input == "standard_scaling_per_dim":
-            # Per-feature mean/std (the precondition for the dimension-scaled
-            # lengthscale prior), fit on the train rows only.
-            mean = self.x[fit_idx].mean(dim=0, keepdim=True)
-            std = self.x[fit_idx].std(dim=0, keepdim=True).clamp_min(1e-8)
+            # Global (single scalar) mean/std fit on train rows only — preserves
+            # per-dim geometry, suited to an isotropic (single-lengthscale) kernel.
+            mean = self.x[fit_idx].mean()
+            std = self.x[fit_idx].std().clamp_min(1e-8)
             self.x = (self.x - mean) / std
+        elif self.normalize_input == "per_dim_normalisation":
+            # Per-feature min-max to [0, 1] using bounds over the COMPLETE
+            # candidate set (all rows, not just train) — mirrors BayBE's fixed
+            # search-space bounds and is the precondition for the dimension-
+            # scaled lengthscale prior.
+            xmin = self.x.min(dim=0, keepdim=True).values
+            xmax = self.x.max(dim=0, keepdim=True).values
+            self.x = (self.x - xmin) / (xmax - xmin).clamp_min(1e-8)
         elif self.normalize_input == "l2_max_scaling":
             self.x = l2_max_scaling(self.x)
         elif self.normalize_input == "l2_normalize":

@@ -51,6 +51,7 @@ from gollum.bo.optimizer import BotorchOptimizer
 
 from gollum.metrics import (
     calculate_data_stats,
+    calculate_ranking_metrics,
     log_bo_metrics,
     log_data_stats,
     log_surrogate_eval,
@@ -228,12 +229,11 @@ def setup_data(config):
 
 
 
-def setup_bo_optimizer(config, design_space):
+def setup_bo_optimizer(config):
     bo_config = config["bo"]["init_args"]
     surrogate_model_config = config["surrogate_model"]
     acquisition_config = config["acquisition"]
     bo = BotorchOptimizer(
-        design_space=design_space,
         surrogate_model_config=surrogate_model_config,
         acq_function_config=acquisition_config,
         batch_strategy=bo_config["batch_strategy"],
@@ -261,15 +261,38 @@ def run_gate(config, dm, bo):
     print(f"Gate: fitting on {train_x.shape[0]} train points, "
           f"evaluating on {test_x.shape[0]} test points")
     bo.train_surrogate_model(train_x, train_y)
-    posterior = bo.surrogate_model.predict(test_x, return_posterior=True)
-    metrics = log_surrogate_eval(
-        posterior, test_y, stage="test", epoch=config.get("n_iters", 0)
-    )
 
-    log_prior_correlation(
-        bo.surrogate_model, train_x, test_x, stage="test",
-        epoch=config.get("n_iters", 0),
-    )
+    epoch = config.get("n_iters", 0)
+    gate_full_eval_max = config.get("gate_full_eval_max", 5000)
+
+    if test_x.shape[0] <= gate_full_eval_max:
+        posterior = bo.surrogate_model.predict(test_x, return_posterior=True)
+        metrics = log_surrogate_eval(
+            posterior, test_y, stage="test", epoch=epoch
+        )
+        log_prior_correlation(
+            bo.surrogate_model, train_x, test_x, stage="test", epoch=epoch,
+        )
+    else:
+        # Predictive mean only, chunked -> no N x N covariance, bounded DeepGP
+        # feature-map forward. Skips NLPD/MSLL/QCE + prior-corr (unused at scale).
+        print(
+            f"Gate: test set ({test_x.shape[0]}) > gate_full_eval_max "
+            f"({gate_full_eval_max}); computing rank metrics only "
+            f"(skipping fit metrics + prior_correlation)."
+        )
+        chunk = 2048
+        means = []
+        for start in range(0, test_x.shape[0], chunk):
+            mean_chunk = bo.surrogate_model.predict(
+                test_x[start:start + chunk], return_var=False
+            )
+            means.append(mean_chunk.detach().cpu())
+        preds = torch.cat(means, dim=0)
+        metrics = calculate_ranking_metrics(preds, test_y.cpu(), stage="test")
+        if wandb.run is not None:
+            wandb.log({**metrics, "epoch": epoch})
+
     print("Gate metrics (train->test):")
     for k, v in metrics.items():
         print(f"  {k}: {v:.4f}")
@@ -314,13 +337,6 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
 
         if not torch.all(matches.sum(dim=-1) == 1):
             print("Unable to find a unique match for some x_next in the dataset.")
-
-        wandb.log(
-            {
-                "evaluated_suggestions": wandb.Histogram(dm.heldout_y[indices]),
-                "epoch": i,
-            }
-        )
 
         x_next = x_next.squeeze(1)
 
@@ -555,18 +571,21 @@ def train(config):
     if config.get("kernel", None) is not None:
         config["surrogate_model"]["init_args"]["kernel"] = config["kernel"]
 
+    if config.get("normalize_input", None) is not None:
+        config["data"]["init_args"]["normalize_input"] = config["normalize_input"]
+
     config = validate_configuration(config)
     wandb_config = flatten(config)
 
-    mode = config.get("mode", "bo") or "bo"
+    mode = config.get("mode", "bo")
     run_name = make_run_name(config, mode)
 
     with wandb.init(
-        project="flip2_gollum_seed_source_comparison", config=wandb_config, group=config["group"], name=run_name
+        project="gollum-flip2-final", config=wandb_config, group=config["group"], name=run_name
     ) as run:
 
         dm = setup_data(config)
-        bo = setup_bo_optimizer(config, design_space=dm.heldout_x)
+        bo = setup_bo_optimizer(config)
 
         data_stats = calculate_data_stats(dm.x, dm.y)
         log_data_stats(data_stats)
@@ -668,6 +687,7 @@ def main():
     )
     parser.add_argument("--kernel", type=str, help="One-word kernel selector (e.g. matern_stuyver)")
     parser.add_argument("--init_method", type=str, help="BO initialization method (e.g. true_random, sobol)")
+    parser.add_argument("--normalize_input", type=str, help="Override data normalize_input (e.g. standard_scaling, per_dim_normalisation, original)")
     parser.add_argument(
         "--mode",
         type=str,
