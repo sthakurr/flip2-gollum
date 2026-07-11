@@ -45,10 +45,9 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         initializer: BOInitializer object to select the initial sample; if None, defaults to random sampling.
         exclude_top: Whether to exclude the top-performing reactions from the initial sample.
         normalize_input: Method for normalizing input features; options include "standard_scaling", "per_dim_normalisation" (per-dim min-max to [0,1] using bounds over the complete candidate set), "l2_max_scaling", "l2_normalize", or "original" (no normalization).
-        respect_split: Whether to respect a train/test split defined in the data; if True, the initial sample is drawn only from "train" rows and "test" rows are held aside for evaluation.
-        split_column: Name of the column defining the train/test split; only used if respect_split is True.
+        test_path: Optional path to a held-aside test CSV. If given, two-phase BO: data_path is the Phase-1 train pool and test_path is the Phase-2 test set (held aside from Phase-1 and used for the gate + Phase-2). If None, the initial sample is drawn from the whole data_path pool (Phase-1 only).
         reduce_dim: Optional PCA reduction (int n_components or float variance fraction), fit on train rows to avoid test leakage; only applied if not None.
-        test_subsample: Optional cap on the number of test points for evaluation when respecting the train/test split; only applied if respect_split is True and the test split is larger than this number.
+        test_subsample: Optional cap on the number of test points; only applied when test_path is set and the test split is larger than this number.
     """
     def __init__(
         self,
@@ -61,8 +60,7 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         initializer: BOInitializer = None,
         exclude_top: bool = False,
         normalize_input: str = "standard_scaling",
-        respect_split: bool = False,
-        split_column: str = "set",
+        test_path: Optional[str] = None,
         reduce_dim: Optional[Union[int, float]] = None,
         test_subsample: Optional[int] = None,
     ) -> None:
@@ -78,11 +76,12 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         )
         self.exclude_top = exclude_top
         self.normalize_input = normalize_input
-        # Two-phase options: when respect_split is true, the initial
-        # (Phase-1) sample is drawn only from rows where split_column=="train" and
-        # the held-out design space (Phase-2 candidates) is the "test" rows.
-        self.respect_split = respect_split
-        self.split_column = split_column
+        # Two-phase BO: when test_path is given, data_path is the Phase-1 train
+        # pool and test_path is the held-aside Phase-2 test set. Internally the two
+        # are concatenated with a synthesized "set" marker column so the split /
+        # normalization logic (fit on train rows only) can tell them apart.
+        self.test_path = test_path
+        self.split_column = "set"
         # Optional PCA reduction (int n_components or float variance fraction),
         # fit on train rows to avoid test leakage.
         self.reduce_dim = reduce_dim
@@ -93,13 +92,17 @@ class BaseDataModule(pl.LightningDataModule, ABC):
 
     def load_data(self):
         self.data = pd.read_csv(self.data_path)
+        if self.test_path is not None:
+            test = pd.read_csv(self.test_path)
+            self.data[self.split_column] = "train"
+            test[self.split_column] = "test"
+            self.data = pd.concat([self.data, test], ignore_index=True)
         if not self.maximize:
             self.data[self.target_column] = -self.data[self.target_column]
 
     def featurize_data(self):
         if (
-            self.respect_split
-            and self.split_column in self.data
+            self.test_path is not None
             and self.featurizer.representation in ("mutation_context",)
         ):
 
@@ -136,8 +139,8 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         self.test_y = None
         self.test_indices = None
 
-        if self.respect_split:
-            init_indexes, heldout_positions = self._split_by_set()
+        if self.test_path is not None:
+            init_indexes, heldout_positions = self._split_two_phase()
         else:
             init_indexes, heldout_positions = self._split_by_initializer()
 
@@ -178,8 +181,8 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         )
         return list(init_indexes), heldout_positions
 
-    def _split_by_set(self):
-        """Two-phase split. The initial sample is drawn only from ``train`` rows;
+    def _split_two_phase(self):
+        """Two-phase split (test_path given). The initial sample is drawn only from ``train`` rows;
         the BO design space (Phase-1 candidates) is the *remaining* ``train`` rows
         — Phase-1 collects from the train distribution. The ``test`` rows are held
         aside in ``self.test_*`` for evaluating the fitted GP (the gate)."""
@@ -188,7 +191,7 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         test_pool = np.where(set_labels == "test")[0]
         if len(train_pool) == 0 or len(test_pool) == 0:
             raise ValueError(
-                f"respect_split=True but column '{self.split_column}' has "
+                f"test_path set but synthesized '{self.split_column}' column has "
                 f"{len(train_pool)} train / {len(test_pool)} test rows."
             )
 
@@ -225,7 +228,7 @@ class BaseDataModule(pl.LightningDataModule, ABC):
         self.test_indices = torch.tensor(test_positions)
 
         print(
-            f"respect_split: {len(init_indexes)} initial train points, "
+            f"two-phase split: {len(init_indexes)} initial train points, "
             f"{len(heldout_positions)} train design-space, "
             f"{len(test_positions)} held-aside test points"
         )
@@ -252,7 +255,7 @@ class BaseDataModule(pl.LightningDataModule, ABC):
     def _fit_rows(self):
         """Row mask used to fit normalization statistics. When respecting the
         train/test split we fit on train rows only, to avoid test leakage."""
-        if self.respect_split and self.split_column in self.data:
+        if self.test_path is not None:
             mask = np.asarray(self.data[self.split_column]) == "train"
         else:
             mask = np.ones(len(self.x), dtype=bool)

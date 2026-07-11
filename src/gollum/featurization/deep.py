@@ -79,6 +79,8 @@ class LLMFeaturizer(BaseNNFeaturizer):
         pooling_method: str = "cls",
         normalize_embeddings: bool = False,
         lora_dropout: float = 0.2,
+        lora_r: int = 4,
+        lora_alpha: int = 16,
         modules_to_save: Optional[List[str]] = ["head"],
         target_ratio: float = 0.25,
         from_top: bool = True,
@@ -100,8 +102,8 @@ class LLMFeaturizer(BaseNNFeaturizer):
             self.llm = get_peft_model(
                 self.llm,
                 LoraConfig(
-                    r=4,
-                    lora_alpha=16,
+                    r=lora_r,
+                    lora_alpha=lora_alpha,
                     target_modules=target_modules,
                     lora_dropout=lora_dropout,
                     bias="none",

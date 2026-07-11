@@ -164,12 +164,9 @@ def log_prior_correlation(
     acts on (DeepGP feature map / GP input transform). A healthy SE-like kernel
     decays with distance; the DKL pathology keeps rho high/flat for far points.
 
-    Logs to W&B: rho histograms (ref->train, ref->test), the mean |rho| to the
-    farthest ``far_frac`` of points (the "flatness" number), and a rho-vs-
-    embedding-distance scatter. Returns a small summary dict.
+    Prints a console diagnostic (fitted lengthscale vs pairwise/NN distance, the
+    "flatness" number) and returns a small summary dict.
     """
-    import wandb
-
     emb_tr = _embed_for_kernel(model, train_x)
     emb_te = _embed_for_kernel(model, test_x)
     emb = torch.cat([emb_tr, emb_te], dim=0)
@@ -184,7 +181,7 @@ def log_prior_correlation(
     g = torch.Generator().manual_seed(seed)
     refs = torch.randperm(n_tr, generator=g)[: min(n_ref, n_tr)]
 
-    rho_tr, rho_te, far_tr, far_te, sc_d, sc_r = [], [], [], [], [], []
+    rho_tr, rho_te, far_tr, far_te = [], [], [], []
     for r in refs.tolist():
         rr = rho[r].clone()
         rr[r] = float("nan")  # drop self
@@ -200,8 +197,6 @@ def log_prior_correlation(
         far_idx = dr.topk(k_far).indices
         far_tr.append(rho[r][far_idx[far_idx < n_tr]])
         far_te.append(rho[r][far_idx[far_idx >= n_tr]])
-        sc_d.append(dist[r])
-        sc_r.append(rho[r])
 
     rho_tr = torch.cat(rho_tr)
     rho_te = torch.cat(rho_te)
@@ -240,26 +235,4 @@ def log_prior_correlation(
         f"median test->NN-train dist={median_nn_dist:.3g}, nn_ratio={nn_ratio:.3g}; "
         f"rho_far_absmean={summary[f'prior_corr/{stage}/rho_far_absmean']:.3g}"
     )
-
-    if wandb.run is not None:
-        log = {**summary, "epoch": epoch}
-        log[f"prior_corr/{stage}/rho_train_hist"] = wandb.Histogram(
-            rho_tr.numpy()
-        )
-        log[f"prior_corr/{stage}/rho_test_hist"] = wandb.Histogram(rho_te.numpy())
-        log[f"prior_corr/{stage}/dist_hist"] = wandb.Histogram(all_pair_dist.numpy())
-        if nn_test_to_train.numel():
-            log[f"prior_corr/{stage}/nn_dist_hist"] = wandb.Histogram(
-                nn_test_to_train.numpy()
-            )
-        sc_d = torch.cat(sc_d).numpy()
-        sc_r = torch.cat(sc_r).numpy()
-        table = wandb.Table(
-            data=list(zip(sc_d.tolist(), sc_r.tolist())),
-            columns=["embed_distance", "rho"],
-        )
-        log[f"prior_corr/{stage}/rho_vs_dist"] = wandb.plot.scatter(
-            table, "embed_distance", "rho", title=f"rho vs distance ({stage})"
-        )
-        wandb.log(log)
     return summary

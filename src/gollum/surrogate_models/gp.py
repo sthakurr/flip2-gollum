@@ -226,7 +226,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         kernel: Union[str, None] = None,
         kernel_apply_prior: bool = True,
         kernel_init_large: bool = True,
-        max_fit_iter: int = 1000,
+        max_fit_iter: int = 100,
     ) -> None:
 
         tkwargs = {
@@ -402,13 +402,11 @@ class DeepGP(SurrogateModel, SingleTaskGP):
                 flush=True,
             )
             _dbg["t_prev"] = _now
-            # Embedding spread this step (reuse forward's output); shrinking
-            # across steps ⇒ feature collapse (Ober DKL pathology).
-            # Lengthscale/outputscale track kernel saturation: collapse onset
-            # should coincide with the lengthscale entering the large regime.
             base = getattr(self.covar_module, "base_kernel", self.covar_module)
             log = {
-                "embed/median_pairwise_dist": torch.pdist(self.finetuned.detach()).median().item(),
+                # moved out of the fit loop — logged once after the fit completes
+                # (one value per epoch); see end of fit().
+                # "embed/median_pairwise_dist": torch.pdist(self.finetuned.detach()).median().item(),
                 "kernel/lengthscale_mean": base.lengthscale.detach().mean().item(),
                 "fit_step": _dbg["step"],
             }
@@ -438,11 +436,13 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
 
         # Baseline embedding spread before any training step (fit_step=0).
-        with torch.no_grad():
-            wandb.log({
-                "embed/median_pairwise_dist": torch.pdist(self._kernel_input()).median().item(),
-                "fit_step": 0,
-            })
+        # Moved out of the fit loop; embedding spread is now logged once after the
+        # fit completes (per epoch) — see end of fit().
+        # with torch.no_grad():
+        #     wandb.log({
+        #         "embed/median_pairwise_dist": torch.pdist(self._kernel_input()).median().item(),
+        #         "fit_step": 0,
+        #     })
 
         # total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         # print(f"Total number of parameters: {total_params}")
@@ -470,7 +470,13 @@ class DeepGP(SurrogateModel, SingleTaskGP):
                 param.requires_grad = False
             fit_gpytorch_mll(mll)
 
-        
+        # Embedding spread after the fit completes — one value per epoch (BO
+        # iteration), replacing the per-fit-step logging in gp_closure.
+        if wandb.run is not None:
+            with torch.no_grad():
+                wandb.log({
+                    "embed/median_pairwise_dist": torch.pdist(self._kernel_input()).median().item(),
+                })
 
     def predict(
         self, x, observation_noise=True, return_var=True, return_posterior=False
@@ -491,5 +497,17 @@ class DeepGP(SurrogateModel, SingleTaskGP):
             if return_posterior
             else (posterior.mean, posterior.variance) if return_var else posterior.mean
         )
+
+    def embed_eval(self, x):
+        """Eval-mode projected embeddings, reusing the norm stats the latest
+        training forward fixed (so the viz pool is scaled like the kernel input)."""
+        emb = self.finetuning_model(x)
+        if self.minmax_embeddings:
+            emb = (emb - self._embed_min) / self._embed_range
+        elif self.normalise_embeddings:
+            emb = (emb - self._embed_mean) / self._embed_std
+        elif self.scale_embeddings:
+            emb = self.scale_to_bounds(emb)
+        return emb
 
 

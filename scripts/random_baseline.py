@@ -125,7 +125,8 @@ def run_phase2_random(dm, n_iters, epoch_offset, batch, rng):
 def main():
     ap = argparse.ArgumentParser(description="Random (model-free) BO baseline")
     ap.add_argument("--config", required=True, help="YAML providing the data block + batch_size")
-    ap.add_argument("--data_path", default=None, help="Override data CSV path")
+    ap.add_argument("--data_path", default=None, help="Override train CSV path")
+    ap.add_argument("--test_path", default=None, help="Override held-aside test CSV path")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--name", default=None, help="W&B run-name base (e.g. <dataset>__random)")
     ap.add_argument("--group", default=None, help="W&B group")
@@ -139,6 +140,8 @@ def main():
     config["seed"] = args.seed
     if args.data_path is not None:
         config["data"]["init_args"]["data_path"] = args.data_path
+    if args.test_path is not None:
+        config["data"]["init_args"]["test_path"] = args.test_path
     # train.py exposes these as top-level CLI args, so they appear as flat keys in
     # the logged config. Mirror them so W&B grouping/filtering matches the BO runs.
     config["data_path"] = config["data"]["init_args"]["data_path"]
@@ -151,7 +154,7 @@ def main():
     seed_everything(args.seed, workers=True)
     dm = setup_data(config)
     if dm.test_x is None:
-        raise ValueError("Random baseline needs a held-aside test set; set respect_split: true.")
+        raise ValueError("Random baseline needs a held-aside test set; provide test_path.")
 
     run_name = f"{args.name or 'random'}_random_full_seed{args.seed}"
     rng = np.random.default_rng(args.seed)

@@ -1,6 +1,14 @@
 """
-Training script for Gollum BO. Can run in "gate" mode to just evaluate surrogate quality on a held-aside test split, "bo" mode to run the Phase-2 BO loop, or "both" to do BO then gate. Example
-Usage: python train.py --config configs/flip2_arms/esm2_dense.yaml --seed 1 --n_iters 3 --mode both
+Training script for Gollum BO.
+
+Without --test_path: runs Phase-1 BO over the whole data_path pool.
+With --test_path: runs Phase-1 BO on data_path, a surrogate-quality gate
+(train->test), then Phase-2 BO over the test set seeded with the Phase-1 points.
+
+Usage:
+  python train.py --config configs/flip2_arms/static/static_esm2_dense.yaml \
+      --data_path data/flip2/nucB/two_to_many_train.csv \
+      --test_path data/flip2/nucB/two_to_many_test.csv --seed 1
 """
 import warnings
 from botorch.exceptions import InputDataWarning
@@ -81,6 +89,8 @@ from gollum.surrogate_models.gp import SurrogateModel
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+CHECKPOINT_DIR = "/iopsstor/scratch/cscs/ssaumya/gollum/checkpoints"
 
 MODEL_EMBEDDING_SIZES = {
     "WhereIsAI/UAE-Large-V1": 1024,
@@ -250,9 +260,7 @@ def run_gate(config, dm, bo):
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if dm.test_x is None:
-        raise ValueError(
-            "Gate mode needs a held-aside test set; set respect_split: true."
-        )
+        raise ValueError("Gate needs a held-aside test set; provide test_path.")
     train_x = dm.train_x.clone().to(device)
     train_y = dm.train_y.clone().to(device)
     test_x = dm.test_x.clone().to(device)
@@ -301,7 +309,7 @@ def run_gate(config, dm, bo):
 
 def run_bo(config, dm, bo, data_stats, n_iters=None):
     """Phase-1 BO loop: iteratively acquire candidates from the held-out design
-    space (the remaining train pool when respect_split is set)."""
+    space (the remaining train pool)."""
     n_iters = n_iters if n_iters is not None else config["n_iters"]
 
     full_train_x = torch.cat([dm.train_x, dm.heldout_x], dim=0)
@@ -320,6 +328,22 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
             n_hit = int((flat >= thr.to(flat.device)).sum().item())
             wandb.log({f"train/coverage_top{label}": n_hit / band_size, "epoch": epoch})
 
+    # Opt-in latent diagnostics (DeepGP only): once per BO epoch, embed the whole
+    # train+heldout pool with that epoch's just-fit model to plot latent-space
+    # evolution + d_hh/d_ll/d_hl, and/or save the finetuned model.
+    diag = None
+    if (config["surrogate_model"]["class_path"] == "gollum.surrogate_models.gp.DeepGP"
+            and any(config.get(f) for f in ("save_epoch_models", "visualize_latent", "plot_distances"))):
+        from gollum.visualization.latent import LatentDiagnostics
+        diag = LatentDiagnostics(
+            out_dir=os.path.join(CHECKPOINT_DIR, wandb.run.name if wandb.run else "default", "latent"),
+            viz_x=torch.cat([dm.train_x, dm.heldout_x], dim=0).to("cuda", torch.float64),
+            viz_y=torch.cat([dm.train_y, dm.heldout_y], dim=0),
+            save_models=bool(config.get("save_epoch_models")),
+            viz_latent=bool(config.get("visualize_latent")),
+            plot_dist=bool(config.get("plot_distances")),
+        )
+
     for i in tqdm(range(n_iters), colour="blue"):
         train_x = dm.train_x.clone().to("cuda")
         train_y = dm.train_y.clone().to("cuda")
@@ -327,6 +351,8 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
 
         ## this trains the model, updates acqf and returns the next point to evaluate
         x_next = bo.suggest_next_experiments(train_x, train_y, design_space)
+        if diag is not None:
+            diag.record(bo.surrogate_model, i)
         x_next = torch.stack(x_next)
 
         log_bo_metrics(data_stats, dm.train_y, epoch=i)
@@ -372,13 +398,15 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
         assert (
             len(common_indices) == 0
         ), f"Common indices found between train and heldout: {common_indices}"
-        # In respect_split mode the test rows are held aside (not in train/heldout).
+        # With a test_path the test rows are held aside (not in train/heldout).
         n_test = 0 if getattr(dm, "test_indices", None) is None else len(dm.test_indices)
         total_indices = len(dm.train_indexes) + len(dm.heldout_indices) + n_test
         assert total_indices == len(dm.x), "Mismatch in the total number of indices"
 
     log_bo_metrics(data_stats, dm.train_y, epoch=n_iters)
     _log_train_coverage(n_iters)
+    if diag is not None:
+        diag.finalize()
 
 
 def _build_phase2_seed(config, dm, seed_source, seed_size, device):
@@ -446,7 +474,7 @@ def run_phase2(config, dm, bo, n_iters, epoch_offset=0,
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if dm.test_x is None:
-        raise ValueError("Phase 2 needs a held-aside test set; set respect_split: true.")
+        raise ValueError("Phase 2 needs a held-aside test set; provide test_path.")
 
     batch = config["bo"]["init_args"].get("batch_size", 96)
     if seed_size is None:
@@ -565,23 +593,31 @@ def train(config):
     if config.get("data_path", None) is not None:
         config["data"]["init_args"]["data_path"] = config["data_path"]
 
-    if config.get("init_method", None) is not None:
-        config["data"]["init_args"]["initializer"]["init_args"]["method"] = config["init_method"]
-
     if config.get("kernel", None) is not None:
         config["surrogate_model"]["init_args"]["kernel"] = config["kernel"]
 
-    if config.get("normalize_input", None) is not None:
-        config["data"]["init_args"]["normalize_input"] = config["normalize_input"]
+    if config.get("lora_r", None) is not None:
+        config["surrogate_model"]["init_args"]["finetuning_model"]["init_args"]["lora_r"] = config["lora_r"]
+
+    if config.get("lora_dropout", None) is not None:
+        config["surrogate_model"]["init_args"]["finetuning_model"]["init_args"]["lora_dropout"] = config["lora_dropout"]
+
+    if config.get("test_path", None) is not None:
+        config["data"]["init_args"]["test_path"] = config["test_path"]
 
     config = validate_configuration(config)
     wandb_config = flatten(config)
 
-    mode = config.get("mode", "bo")
+    # Two-phase iff a test set is configured. mode label is for naming/logging only
+    # (analysis scripts filter W&B runs on config.mode).
+    has_test = config["data"]["init_args"].get("test_path") is not None
+    mode = "full" if has_test else "bo"
+    wandb_config["mode"] = mode
     run_name = make_run_name(config, mode)
 
     with wandb.init(
-        project="gollum-flip2-final", config=wandb_config, group=config["group"], name=run_name
+        project=config.get("wandb_project") or "gollum-flip2-final",
+        config=wandb_config, name=run_name
     ) as run:
 
         dm = setup_data(config)
@@ -590,15 +626,20 @@ def train(config):
         data_stats = calculate_data_stats(dm.x, dm.y)
         log_data_stats(data_stats)
 
-        # Phase iteration counts: `full` uses separate phase1/phase2 budgets;
-        # other modes fall back to n_iters.
+        # Phase iteration counts: two-phase uses separate phase1/phase2 budgets;
+        # Phase-1-only falls back to n_iters.
         phase1_iters = config.get("phase1_iters") or config.get("n_iters", 3)
         phase2_iters = config.get("phase2_iters") or config.get("n_iters", 3)
 
-        if mode == "full":
+        if not has_test:
+            # Phase-1 BO only, over the whole data_path pool.
+            run_bo(config, dm, bo, data_stats, n_iters=phase1_iters)
+        else:
             # `or` (not get-with-default): the CLI registers seed_source as
             # present-but-None when unset, so a plain .get would return None.
             seed_source = config.get("seed_source") or "phase1_bo"
+            # phase1_bo seeds Phase-2 from the Phase-1-collected points, so it
+            # runs Phase-1 + gate first; the other baselines seed independently.
             if seed_source == "phase1_bo":
                 run_bo(config, dm, bo, data_stats, n_iters=phase1_iters)
                 run_gate(config, dm, bo)
@@ -606,45 +647,17 @@ def train(config):
                 config, dm, bo, phase2_iters,
                 epoch_offset=phase1_iters + 1, seed_source=seed_source,
             )
-        else:
-            # For `both`: Phase-1 BO collection over train, then gate-evaluate
-            # the resulting GP on the held-aside test split.
-            if mode in ("bo", "both"):
-                run_bo(config, dm, bo, data_stats, n_iters=phase1_iters)
-            if mode in ("gate", "both"):
-                run_gate(config, dm, bo)
 
         # Save finetuned model if using DeepGP
         if config["surrogate_model"]["class_path"] == "gollum.surrogate_models.gp.DeepGP" and config["save_model"] == True:
             model_save_path = os.path.join(
-                "checkpoints", run.name if run else "default", "finetuned_model.pt"
+                CHECKPOINT_DIR, run.name if run else "default", "finetuned_model.pt"
             )
             os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
             torch.save(
                 bo.surrogate_model.finetuning_model.state_dict(), model_save_path
             )
             print(f"Saved finetuned model to {model_save_path}")
-
-            # Visualize embeddings if requested
-            if config.get("visualize", False) and config.get("full_data_path"):
-                from gollum.visualization import visualize_embeddings
-
-                ft_config = config["surrogate_model"]["init_args"]["finetuning_model"]["init_args"]
-                model_name = ft_config["model_name"]
-                pooling_method = ft_config["pooling_method"]
-
-                output_dir = os.path.join(
-                    "plots", "embeddings", run.name if run else "default"
-                )
-                visualize_embeddings(
-                    full_data_path=config["full_data_path"],
-                    model_name=model_name,
-                    pooling_method=pooling_method,
-                    model_state_path=model_save_path,
-                    finetuning_model_config=ft_config,
-                    output_dir=output_dir,
-                    random_state=config.get("seed", 42),
-                )
 
         logger.setLevel(logging.INFO)
         wandb.finish()
@@ -666,7 +679,11 @@ def main():
 
     # parser.add_argument("--n_iters", type=int, help="How many iterations to run")
     parser.add_argument(
-        "--data_path", type=str, help="Data file csv path"
+        "--data_path", type=str, help="Phase-1 train data csv path"
+    )
+    parser.add_argument(
+        "--test_path", type=str, default=None,
+        help="Optional held-aside test csv; if given, runs gate + Phase-2 BO on it",
     )
     parser.add_argument(
         "--phase1_iters", type=int, help="Phase-1 (train) BO iterations (full mode)"
@@ -686,20 +703,15 @@ def main():
         help="Seed size for random_train / none (default: matched to Phase-1 budget)",
     )
     parser.add_argument("--kernel", type=str, help="One-word kernel selector (e.g. matern_stuyver)")
-    parser.add_argument("--init_method", type=str, help="BO initialization method (e.g. true_random, sobol)")
-    parser.add_argument("--normalize_input", type=str, help="Override data normalize_input (e.g. standard_scaling, per_dim_normalisation, original)")
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default="bo",
-        help="gate (fit train, rank test), bo (Phase-1 collect), both (bo+gate), "
-        "or full (Phase-1 train BO -> Phase-2 test BO)",
-    )
-    parser.add_argument("--group", type=str, help="Wandb group runs")
+    parser.add_argument("--lora_r", type=int, help="LoRA rank override for the finetuning featurizer")
+    parser.add_argument("--lora_dropout", type=float, help="LoRA dropout override for the finetuning featurizer")
+    # parser.add_argument("--group", type=str, help="Wandb group runs")
     parser.add_argument("--name", type=str, default=None, help="Wandb run name base")
+    parser.add_argument("--wandb_project", type=str, default=None, help="Wandb project name (default gollum-flip2-final)")
     parser.add_argument("--save_model", type=bool, default=False, help="Save the finetuned model after training")
-    parser.add_argument("--visualize", type=bool, default=False, help="Visualize embeddings after training")
-    parser.add_argument("--full_data_path", type=str, default=None, help="Path to full dataset with split labels (for visualization)")
+    parser.add_argument("--save_epoch_models", type=bool, default=False, help="DeepGP: save the finetuning model at every fit epoch")
+    parser.add_argument("--visualize_latent", type=bool, default=False, help="DeepGP: plot latent-space (UMAP) evolution across fit epochs")
+    parser.add_argument("--plot_distances", type=bool, default=False, help="DeepGP: plot d_hh/d_ll/d_hl (80/20 fitness-quantile latent distances) across fit epochs")
 
     parser.add_subclass_arguments(BaseDataModule, "data", instantiate=False)
     parser.add_subclass_arguments(SurrogateModel, "surrogate_model", instantiate=False)
