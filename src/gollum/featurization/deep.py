@@ -5,10 +5,30 @@ from abc import ABC, abstractmethod
 from typing import Optional, List
 from peft import LoraConfig, get_peft_model
 from gollum.featurization.utils.pooling import average_pool, last_token_pool, weighted_average_pool
-from gollum.featurization.text import get_model_and_tokenizer, _esmc_pool
+from gollum.featurization.text import get_model_and_tokenizer, esmc_pool
 from gollum.featurization.utils.layers import get_target_layers
 from torch.nn import init
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
+
+
+def token_mutation_pool(hidden, input_ids, consensus_ids, attn_mask):
+    """Average hidden states only at token positions that differ from the consensus.
+
+    ``consensus_ids`` is the per-position most-frequent token id over the featurized
+    set; positions equal to it (special tokens, padding, and unmutated residues are
+    all constant across combinatorial mutants) are excluded. Rows with no mutated
+    positions fall back to a mask-averaged pool. Works for both HF ESM2
+    (last_hidden_state) and ESM-C (embeddings) token layouts.
+    """
+    mask = (input_ids != consensus_ids.unsqueeze(0)) & attn_mask.bool()  # (B, T)
+    m = mask.unsqueeze(-1).to(hidden.dtype)
+    cnt = m.sum(dim=1)  # (B, 1)
+    pooled = (hidden * m).sum(dim=1) / cnt.clamp_min(1.0)
+    nomut = (cnt.squeeze(-1) == 0)
+    if nomut.any():
+        am = attn_mask[nomut].unsqueeze(-1).to(hidden.dtype)
+        pooled[nomut] = (hidden[nomut] * am).sum(dim=1) / am.sum(dim=1).clamp_min(1.0)
+    return pooled
 
 class BaseNNFeaturizer(nn.Module):
     """
@@ -91,7 +111,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
         # ESM-C (EvolutionaryScale) is not a HuggingFace PreTrainedModel: it has a
         # different forward signature (sequence_tokens) and output field
         # (.embeddings), and needs manual gradient checkpointing.
-        self._uses_esmc = "esmc" in model_name.lower()
+        self.uses_esmc = "esmc" in model_name.lower()
         self.gradient_checkpointing = gradient_checkpointing
         self.llm, self.tokenizer = get_model_and_tokenizer(model_name, "cuda")
         if trainable:
@@ -117,7 +137,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
             # so activation memory scales with the train-set size and OOMs on a
             # large LLM. enable_input_require_grads is required for checkpointing
             # to propagate gradients through a LoRA-wrapped frozen backbone.
-            if gradient_checkpointing and not self._uses_esmc:
+            if gradient_checkpointing and not self.uses_esmc:
                 # HF-native gradient checkpointing (ESM-C uses manual
                 # torch.utils.checkpoint in get_embeddings instead).
                 try:
@@ -165,6 +185,12 @@ class LLMFeaturizer(BaseNNFeaturizer):
         n_points = x.size(0)
         ids_split = int(x.shape[-1] / 2)
 
+        # Per-position consensus token id over the whole featurized set, for
+        # mutation-site pooling (positions differing from it are the mutations).
+        consensus_ids = None
+        if self.pooling_method == "mutation":
+            consensus_ids = x[:, :ids_split].long().mode(dim=0).values
+
         embedding_chunks = []
 
         current_idx = 0
@@ -176,32 +202,36 @@ class LLMFeaturizer(BaseNNFeaturizer):
             _config = getattr(self.llm, "config", None)
             is_enc_dec = getattr(_config, "is_encoder_decoder", False)
 
-            def _run(ids, mask):
-                if self._uses_esmc:
+            def run(ids, mask):
+                if self.uses_esmc:
                     return self.llm(sequence_tokens=ids, sequence_id=None)
                 if is_enc_dec:
                     return self.llm.encoder(input_ids=ids, attention_mask=mask)
                 return self.llm(input_ids=ids, attention_mask=mask)
 
             if self.trainable:
-                if self._uses_esmc and self.gradient_checkpointing:
+                if self.uses_esmc and self.gradient_checkpointing:
                     outputs = grad_checkpoint(
-                        lambda t: _run(t, attn_mask), input_ids, use_reentrant=False
+                        lambda t: run(t, attn_mask), input_ids, use_reentrant=False
                     )
                 else:
-                    outputs = _run(input_ids, attn_mask)
+                    outputs = run(input_ids, attn_mask)
             else:
                 self.llm.eval()
                 with torch.no_grad():
-                    outputs = _run(input_ids, attn_mask)
+                    outputs = run(input_ids, attn_mask)
 
             last_hidden_state = (
-                outputs.embeddings if self._uses_esmc else outputs.last_hidden_state
+                outputs.embeddings if self.uses_esmc else outputs.last_hidden_state
             )
 
-            if self.pooling_method == "average":
-                pooled = (_esmc_pool(last_hidden_state, attn_mask, "average")
-                          if self._uses_esmc
+            if self.pooling_method == "mutation":
+                pooled = token_mutation_pool(
+                    last_hidden_state, input_ids, consensus_ids, attn_mask
+                )
+            elif self.pooling_method == "average":
+                pooled = (esmc_pool(last_hidden_state, attn_mask, "average")
+                          if self.uses_esmc
                           else average_pool(last_hidden_state, attn_mask))
             elif self.pooling_method == "cls":
                 pooled = last_hidden_state[:, 0]

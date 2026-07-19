@@ -463,7 +463,7 @@ def _cache_path(tag, texts):
     return os.path.join(EMBEDDING_CACHE_DIR, f"{safe_tag}_{h}.npy")
 
 
-def _esmc_pool(hidden, attn, pooling_method):
+def esmc_pool(hidden, attn, pooling_method):
     """Pool ESM-C per-residue hidden states ``(B, L, D)`` to ``(B, D)``.
 
     ``attn`` is the ``(B, L)`` attention mask. For average pooling we mean over
@@ -555,7 +555,7 @@ def get_esmc_embeddings(
                 if pooling_method == "mutation":
                     pooled = _mutation_pool(model_out.embeddings, attn, batch, mut_consensus)
                 else:
-                    pooled = _esmc_pool(model_out.embeddings, attn, pooling_method)
+                    pooled = esmc_pool(model_out.embeddings, attn, pooling_method)
             out_list.append(_normalize_and_np(pooled))
         return np.concatenate(out_list, axis=0)
 
