@@ -226,6 +226,40 @@ def get_tokens(
     return all_encoded_inputs.cpu().numpy()
 
 
+def _mutation_pool(hidden, attn, batch_texts, consensus, cons_hidden=None):
+    """Average token embeddings only at residues that differ from the consensus.
+
+    Residue i maps to token i+1 (a <cls>/BOS token sits at position 0). Concentrates
+    the representation on the mutated sites instead of diluting them across the whole
+    sequence. Sequences equal to the consensus fall back to a mask-averaged pool.
+
+    If ``cons_hidden`` (the consensus's per-token hidden states, shape (1, T, D)) is
+    given, pool the site-wise *delta* (mutant - consensus) at each mutated residue —
+    the embedding-space direction of each substitution. Consensus-equal sequences
+    then map to the zero vector (no change).
+    """
+    out = []
+    T = hidden.shape[1]
+    for b, seq in enumerate(batch_texts):
+        idx = [
+            i + 1
+            for i, a in enumerate(seq)
+            if i < len(consensus) and a != consensus[i] and i + 1 < T
+        ]
+        if idx:
+            tidx = torch.tensor(idx, device=hidden.device)
+            sel = hidden[b, tidx]
+            if cons_hidden is not None:
+                sel = sel - cons_hidden[0, tidx]
+            out.append(sel.mean(0))
+        elif cons_hidden is not None:
+            out.append(torch.zeros(hidden.shape[-1], device=hidden.device, dtype=hidden.dtype))
+        else:
+            m = attn[b].unsqueeze(-1).to(hidden.dtype)
+            out.append((hidden[b] * m).sum(0) / m.sum().clamp_min(1))
+    return torch.stack(out)
+
+
 def get_huggingface_embeddings(
     texts,
     model_name="tiiuae/falcon-7b",
@@ -251,6 +285,9 @@ def get_huggingface_embeddings(
         max_length = 512
     texts = list(texts)
     wt_seq = _consensus(texts) if wt_ref else None
+    mut_consensus = (
+        _consensus(texts) if pooling_method in ("mutation", "mutation_delta") else None
+    )
     cache = (
         _cache_path(
             f"hf_{model_name}_{pooling_method}_L{max_length}"
@@ -307,11 +344,34 @@ def get_huggingface_embeddings(
                 if is_encoder_decoder
                 else model(**encoded_input)
             )
+            if pooling_method in ("mutation", "mutation_delta"):
+                return _mutation_pool(
+                    outputs.last_hidden_state,
+                    encoded_input["attention_mask"],
+                    batch_texts,
+                    mut_consensus,
+                    cons_hidden=cons_hidden if pooling_method == "mutation_delta" else None,
+                )
             return pooling_functions[pooling_method](
                 outputs.last_hidden_state, encoded_input["attention_mask"]
             )
 
     wt_pooled = _forward_pooled([wt_seq]) if wt_ref else None
+
+    # Per-token consensus hidden states for site-wise delta pooling.
+    cons_hidden = None
+    if pooling_method == "mutation_delta":
+        enc = tokenizer(
+            [mut_consensus], padding=True, truncation=True,
+            max_length=max_length, return_tensors="pt",
+        ).to(device)
+        with torch.inference_mode(), torch.autocast(
+            device_type="cuda", dtype=torch.bfloat16, enabled=autocast_enabled
+        ):
+            cons_out = (
+                model.encoder(**enc) if is_encoder_decoder else model(**enc)
+            )
+            cons_hidden = cons_out.last_hidden_state
 
     for i in tqdm(
         range(0, len(texts), batch_size), desc=f"Processing with {model_name}"
@@ -445,6 +505,7 @@ def get_esmc_embeddings(
     Raises a clear ImportError if ``esm`` is missing so the sweep can skip ESM-C.
     """
     texts = list(texts)
+    mut_consensus = _consensus(texts) if pooling_method == "mutation" else None
     cache = (
         _cache_path(f"esmc_{model_name}_{pooling_method}_norm{int(normalize_embeddings)}", texts)
         if use_cache
@@ -491,7 +552,10 @@ def get_esmc_embeddings(
                 device_type="cuda", dtype=torch.bfloat16, enabled=autocast_enabled
             ):
                 model_out = client(sequence_tokens=input_ids)
-                pooled = _esmc_pool(model_out.embeddings, attn, pooling_method)
+                if pooling_method == "mutation":
+                    pooled = _mutation_pool(model_out.embeddings, attn, batch, mut_consensus)
+                else:
+                    pooled = _esmc_pool(model_out.embeddings, attn, pooling_method)
             out_list.append(_normalize_and_np(pooled))
         return np.concatenate(out_list, axis=0)
 
@@ -510,6 +574,16 @@ def get_esmc_embeddings(
                     pooled = emb[0, 1:-1, :].mean(dim=0, keepdim=True)
                 elif pooling_method == "cls":
                     pooled = emb[0, 0:1, :]
+                elif pooling_method == "mutation":
+                    T = emb.shape[1]
+                    idx = [
+                        i + 1 for i, a in enumerate(seq)
+                        if i < len(mut_consensus) and a != mut_consensus[i] and i + 1 < T
+                    ]
+                    if idx:
+                        pooled = emb[0, torch.tensor(idx, device=emb.device)].mean(0, keepdim=True)
+                    else:
+                        pooled = emb[0, 1:-1, :].mean(dim=0, keepdim=True)
                 else:
                     raise ValueError(f"Unsupported pooling_method: {pooling_method}")
             out_list.append(_normalize_and_np(pooled))

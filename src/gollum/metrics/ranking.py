@@ -124,15 +124,7 @@ def _embed_for_kernel(model, x):
     with torch.no_grad():
         if getattr(model, "finetuning_model", None) is not None:
             emb = model.finetuning_model(x)
-            if getattr(model, "minmax_embeddings", False):
-                mn, rng = getattr(model, "_embed_min", None), getattr(model, "_embed_range", None)
-                if mn is not None and rng is not None:
-                    emb = (emb - mn) / rng
-            elif getattr(model, "normalise_embeddings", False):
-                mean, std = model._embed_mean, model._embed_std
-                if mean is not None and std is not None:
-                    emb = (emb - mean) / std
-            elif getattr(model, "scale_embeddings", False):
+            if getattr(model, "scale_embeddings", False):
                 emb = model.scale_to_bounds(emb)
         elif hasattr(model, "transform_inputs"):
             emb = model.transform_inputs(x)

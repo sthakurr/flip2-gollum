@@ -190,22 +190,6 @@ def validate_configuration(config):
         if not is_llm_featurizer and representation == "get_tokens":
             raise ValueError("DeepGP with ProjectionLayer requires pre-computed embeddings, not 'get_tokens'.")
 
-    # Validate the one-word kernel selector, if used.
-    surrogate_args = config["surrogate_model"].get("init_args", {}) or {}
-    kernel = surrogate_args.get("kernel")
-    if kernel is not None:
-        from gollum.surrogate_models.kernels import VALID_KERNELS
-
-        if kernel not in VALID_KERNELS:
-            raise ValueError(
-                f"Unknown kernel '{kernel}'; choose one of {VALID_KERNELS}."
-            )
-        if surrogate_args.get("covar_module") is not None:
-            print(
-                "WARNING: both 'covar_module' and 'kernel' are set; the explicit "
-                "covar_module takes precedence and 'kernel' is ignored."
-            )
-    
     # Ensure model embedding sizes are correct
     model_name = featurizer_config.get("model_name")
     if model_name in MODEL_EMBEDDING_SIZES:
@@ -581,9 +565,29 @@ def make_run_name(config, mode):
         reduce_dim = config["data"]["init_args"].get("reduce_dim")
         if reduce_dim:
             base += f"_pca{reduce_dim}"
-    kernel = (config["surrogate_model"].get("init_args", {}) or {}).get("kernel")
-    kernel_tag = f"_{kernel.replace('matern_', '')}" if kernel else ""
-    return f"{base}{kernel_tag}_{mode}_seed{config['seed']}"
+    acq = config.get("acq")
+    beta = config.get("beta")
+    if acq == "ucb" or (acq is None and beta is not None):
+        acq_tag = f"_ucb{beta}"
+    elif acq:
+        acq_tag = f"_{acq}"
+    else:
+        acq_tag = ""
+    return f"{base}{acq_tag}_{mode}_seed{config['seed']}"
+
+
+def acq_spec(acq):
+    """Build an acquisition config from a one-word tag (--acq). beta is injected
+    separately for ucb."""
+    specs = {
+        "ei": "botorch.acquisition.analytic.ExpectedImprovement",
+        "logei": "botorch.acquisition.analytic.LogExpectedImprovement",
+        "ucb": "botorch.acquisition.analytic.UpperConfidenceBound",
+        "greedy": "botorch.acquisition.analytic.PosteriorMean",
+    }
+    if acq not in specs:
+        raise ValueError(f"Unknown --acq '{acq}', expected one of {list(specs)}")
+    return {"class_path": specs[acq], "init_args": {"maximize": True}}
 
 
 def train(config):
@@ -593,9 +597,6 @@ def train(config):
     if config.get("data_path", None) is not None:
         config["data"]["init_args"]["data_path"] = config["data_path"]
 
-    if config.get("kernel", None) is not None:
-        config["surrogate_model"]["init_args"]["kernel"] = config["kernel"]
-
     if config.get("lora_r", None) is not None:
         config["surrogate_model"]["init_args"]["finetuning_model"]["init_args"]["lora_r"] = config["lora_r"]
 
@@ -604,6 +605,13 @@ def train(config):
 
     if config.get("test_path", None) is not None:
         config["data"]["init_args"]["test_path"] = config["test_path"]
+
+    if config.get("acq", None) is not None:
+        config["acquisition"] = acq_spec(config["acq"])
+
+    if config.get("beta", None) is not None and \
+            "UpperConfidenceBound" in config["acquisition"]["class_path"]:
+        config["acquisition"]["init_args"]["beta"] = config["beta"]
 
     config = validate_configuration(config)
     wandb_config = flatten(config)
@@ -702,7 +710,8 @@ def main():
         type=int,
         help="Seed size for random_train / none (default: matched to Phase-1 budget)",
     )
-    parser.add_argument("--kernel", type=str, help="One-word kernel selector (e.g. matern_stuyver)")
+    parser.add_argument("--acq", type=str, help="Acquisition override: logei | ucb | greedy")
+    parser.add_argument("--beta", type=float, help="UCB beta override (acquisition.init_args.beta)")
     parser.add_argument("--lora_r", type=int, help="LoRA rank override for the finetuning featurizer")
     parser.add_argument("--lora_dropout", type=float, help="LoRA dropout override for the finetuning featurizer")
     # parser.add_argument("--group", type=str, help="Wandb group runs")

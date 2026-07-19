@@ -20,7 +20,7 @@ from botorch.models import SingleTaskGP
 from abc import ABC, abstractmethod
 from gpytorch.means.mean import Mean
 from gpytorch.module import Module
-from gollum.surrogate_models.kernels import build_covar_module
+from gpytorch.kernels import MaternKernel, ScaleKernel
 
 from typing import Union
 import numpy as np
@@ -59,16 +59,7 @@ class GP(SurrogateModel, SingleTaskGP):
         initial_outputscale_val: float = 1.0,
         initial_lengthscale_val: float = 1.0,
         gp_lr: float = 0.2,
-        kernel: Union[str, None] = None,
-        kernel_apply_prior: bool = False,
-        kernel_init_large: bool = False,
     ) -> None:
-
-        if covar_module is None and kernel is not None:
-            covar_module = build_covar_module(
-                kernel, dim=train_x.shape[-1],
-                apply_prior=kernel_apply_prior, init_large=kernel_init_large,
-            )
 
         super().__init__(
             train_X=train_x,
@@ -87,10 +78,11 @@ class GP(SurrogateModel, SingleTaskGP):
             "raw_noise", GreaterThan(noise_constraint)
         )
 
-        hypers = {"likelihood.noise_covar.noise": torch.tensor(initial_noise_val)}
-        if kernel is None:
-            hypers["covar_module.base_kernel.lengthscale"] = torch.tensor(initial_lengthscale_val)
-            hypers["covar_module.outputscale"] = torch.tensor(initial_outputscale_val)
+        hypers = {
+            "likelihood.noise_covar.noise": torch.tensor(initial_noise_val),
+            "covar_module.base_kernel.lengthscale": torch.tensor(initial_lengthscale_val),
+            "covar_module.outputscale": torch.tensor(initial_outputscale_val),
+        }
 
         existing_parameters = {name for name, _ in self.named_parameters()}
         print(f"Existing parameters in the model: {existing_parameters}")
@@ -217,15 +209,9 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         gp_step_lr: float = 0.95,
         wd: float = 1e-3,
         wd_llm: float = 1e-3,
-        normalise_embeddings: bool = False,
-        scale_embeddings: bool = False,
-        minmax_embeddings: bool = False,
+        scale_embeddings: bool = True,
         train_mll_additionally: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
-        embedding_norm: str = "scale_to_bounds",
-        kernel: Union[str, None] = None,
-        kernel_apply_prior: bool = True,
-        kernel_init_large: bool = True,
         max_fit_iter: int = 100,
     ) -> None:
 
@@ -250,29 +236,13 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.train_x = train_x
         self.train_y = train_y
 
-        ft_out_dim = (
-            finetuning_model.projection_dim
-            if getattr(finetuning_model, "projection_dim", None)
-            else finetuning_model.input_dim
-        )
-
         if covar_module is None:
-            covar_module = build_covar_module(
-                kernel or "matern_hvarfner", dim=ft_out_dim,
-                apply_prior=kernel_apply_prior, init_large=kernel_init_large,
-            )
+            covar_module = ScaleKernel(MaternKernel(nu=2.5))
         if mean_module is None:
             mean_module = ConstantMean()
 
         self.mean_module = mean_module
         self.covar_module = covar_module
-
-        self.normalise_embeddings = normalise_embeddings
-        self.minmax_embeddings = minmax_embeddings
-        self.register_buffer("_embed_mean", None)
-        self.register_buffer("_embed_std", None)
-        self.register_buffer("_embed_min", None)
-        self.register_buffer("_embed_range", None)
 
         self.finetuning_model = finetuning_model
         self.finetuning_model = self.finetuning_model.to(**tkwargs)
@@ -280,11 +250,11 @@ class DeepGP(SurrogateModel, SingleTaskGP):
             "raw_noise", GreaterThan(noise_constraint)
         )
 
-        # When a kernel string is provided, build_covar_module already sets lengthscale/outputscale to their dimension-aware values.
-        hypers = {"likelihood.noise_covar.noise": torch.tensor(initial_noise_val)}
-        if kernel is None:
-            hypers["covar_module.base_kernel.lengthscale"] = torch.tensor(initial_lengthscale_val)
-            hypers["covar_module.outputscale"] = torch.tensor(initial_outputscale_val)
+        hypers = {
+            "likelihood.noise_covar.noise": torch.tensor(initial_noise_val),
+            "covar_module.base_kernel.lengthscale": torch.tensor(initial_lengthscale_val),
+            "covar_module.outputscale": torch.tensor(initial_outputscale_val),
+        }
 
         existing_parameters = {name for name, _ in self.named_parameters()}
         hypers_to_use = {
@@ -306,61 +276,23 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.train_mll_additionally = train_mll_additionally
         self.max_fit_iter = max_fit_iter
 
-        if not (self.normalise_embeddings or self.scale_embeddings or self.minmax_embeddings):
-            if (kernel or "matern_hvarfner") in ("matern_stuyver", "matern_hvarfner"):
-                self.minmax_embeddings = True
-            else:
-                self.scale_embeddings = True
-
         self.to_gpu()
 
     def forward(self, x):
         finetuned = self.finetuning_model(x)
-        if self.minmax_embeddings:
-            # Per-dim min-max to [0,1]^d (unit hypercube) — the input scale the
-            # dimension-aware priors (stuyver/hvarfner) assume. Fit on the train
-            # batch, stored, reused at eval.
-            if self.training:
-                mn = finetuned.min(dim=0, keepdim=True).values
-                rng = (finetuned.max(dim=0, keepdim=True).values - mn).clamp_min(1e-8)
-                self._embed_min = mn.detach()
-                self._embed_range = rng.detach()
-            else:
-                mn, rng = self._embed_min, self._embed_range
-            finetuned = (finetuned - mn) / rng
-        elif self.normalise_embeddings:
-            if self.training:
-                mean = finetuned.mean(dim=0, keepdim=True)
-                std = finetuned.std(dim=0, keepdim=True).clamp_min(1e-8)
-                self._embed_mean = mean.detach()
-                self._embed_std = std.detach()
-            else:
-                mean, std = self._embed_mean, self._embed_std
-            finetuned = (finetuned - mean) / std
-        elif self.scale_embeddings:
+        if self.scale_embeddings:
             finetuned = self.scale_to_bounds(finetuned)
         self.finetuned = finetuned
 
         mean_x = self.mean_module(self.finetuned)
         covar_x = self.covar_module(self.finetuned)
-        
-        wandb.log({"lr/llm_lr": self.optimizer.param_groups[0]["lr"]})
-        wandb.log({"lr/gp_lr": self.optimizer.param_groups[1]["lr"]})
 
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
     def _kernel_input(self):
-        """Projected + normalised train embeddings — the space the kernel sees."""
+        """Projected + scaled train embeddings — the space the kernel sees."""
         emb = self.finetuning_model(self.train_x)
-        if self.minmax_embeddings:
-            mn = emb.min(dim=0, keepdim=True).values
-            rng = (emb.max(dim=0, keepdim=True).values - mn).clamp_min(1e-8)
-            emb = (emb - mn) / rng
-        elif self.normalise_embeddings:
-            mean = emb.mean(dim=0, keepdim=True)
-            std = emb.std(dim=0, keepdim=True).clamp_min(1e-8)
-            emb = (emb - mean) / std
-        elif self.scale_embeddings:
+        if self.scale_embeddings:
             emb = self.scale_to_bounds(emb)
         return emb
 
@@ -409,6 +341,8 @@ class DeepGP(SurrogateModel, SingleTaskGP):
                 # "embed/median_pairwise_dist": torch.pdist(self.finetuned.detach()).median().item(),
                 "kernel/lengthscale_mean": base.lengthscale.detach().mean().item(),
                 "fit_step": _dbg["step"],
+                "lr/llm_lr": self.optimizer.param_groups[0]["lr"],
+                "lr/gp_lr": self.optimizer.param_groups[1]["lr"],
             }
             if hasattr(self.covar_module, "outputscale"):
                 log["kernel/outputscale"] = self.covar_module.outputscale.detach().mean().item()
@@ -499,14 +433,9 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         )
 
     def embed_eval(self, x):
-        """Eval-mode projected embeddings, reusing the norm stats the latest
-        training forward fixed (so the viz pool is scaled like the kernel input)."""
+        """Eval-mode projected embeddings, scaled like the kernel input."""
         emb = self.finetuning_model(x)
-        if self.minmax_embeddings:
-            emb = (emb - self._embed_min) / self._embed_range
-        elif self.normalise_embeddings:
-            emb = (emb - self._embed_mean) / self._embed_std
-        elif self.scale_embeddings:
+        if self.scale_embeddings:
             emb = self.scale_to_bounds(emb)
         return emb
 

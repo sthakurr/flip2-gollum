@@ -158,9 +158,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
             device=torch.device("cuda"), dtype=torch.float32
         )
 
-    def get_embeddings(self, x, batch_size=16):
-        torch.cuda.empty_cache()
-
+    def get_embeddings(self, x, batch_size=64):
         x = x.to(dtype=torch.float32)
         self.llm = self.llm.to(dtype=torch.float32)
 
@@ -171,8 +169,6 @@ class LLMFeaturizer(BaseNNFeaturizer):
 
         current_idx = 0
         for start_idx in range(0, n_points, batch_size):
-
-            torch.cuda.empty_cache()
             end_idx = min(start_idx + batch_size, n_points)
             input_ids = x[start_idx:end_idx, :ids_split].long()
             attn_mask = x[start_idx:end_idx, ids_split:].long()
@@ -225,7 +221,6 @@ class LLMFeaturizer(BaseNNFeaturizer):
             embedding_chunks.append(pooled.to(dtype=torch.float64))
             current_idx += batch_size
             del outputs, last_hidden_state, pooled
-            torch.cuda.empty_cache()
         
         embeddings = torch.cat(embedding_chunks, dim=0)
         return embeddings
