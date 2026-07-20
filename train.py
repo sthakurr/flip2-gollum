@@ -232,6 +232,7 @@ def setup_bo_optimizer(config):
         acq_function_config=acquisition_config,
         batch_strategy=bo_config["batch_strategy"],
         batch_size=bo_config["batch_size"],
+        finetune_start_iter=bo_config.get("finetune_start_iter", 0),
     )
     return bo
 

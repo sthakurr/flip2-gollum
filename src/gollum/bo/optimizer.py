@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional
+from copy import deepcopy
 from gollum.data.utils import torch_delete_rows
 from gollum.utils.config import instantiate_class
 import torch
@@ -11,6 +12,7 @@ class BotorchOptimizer:
         acq_function_config: Optional[Dict[str, Any]] = None,
         batch_strategy: str = "kriging",
         batch_size: int = 1,
+        finetune_start_iter: int = 0,
         tkwargs: Optional[Dict[str, Any]] = {
             "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             "dtype": torch.float64,
@@ -26,6 +28,11 @@ class BotorchOptimizer:
         self.acquisition_function = None
         self.batch_strategy = batch_strategy
         self.batch_size = batch_size
+        # Freeze the LoRA finetuner for the first `finetune_start_iter` BO
+        # iterations (use frozen features), then enable finetuning. Avoids
+        # overfitting the LLM on the tiny early train set. 0 = always finetune.
+        self.finetune_start_iter = finetune_start_iter
+        self._bo_iter = 0
 
         self.tkwargs = tkwargs
         print("Using device:", self.tkwargs["device"])
@@ -57,10 +64,25 @@ class BotorchOptimizer:
             y_lie, _ = self.surrogate_model.predict(candidate)
         return y_lie
 
+    def _surrogate_config_for_iter(self):
+        """Surrogate config for the current BO iteration. Before
+        ``finetune_start_iter`` the LoRA finetuner is frozen (trainable=False) so
+        early fits use static features; afterwards the config is used as-is."""
+        cfg = self.surrogate_model_config
+        if self._bo_iter >= self.finetune_start_iter:
+            return cfg
+        cfg = deepcopy(cfg)
+        ft = cfg.get("init_args", {}).get("finetuning_model")
+        if ft is not None and "init_args" in ft:
+            ft["init_args"]["trainable"] = False
+            print(f"[finetune_start_iter] BO iter {self._bo_iter} < "
+                  f"{self.finetune_start_iter}: freezing finetuner (static features)")
+        return cfg
+
     def train_surrogate_model(self, train_x, train_y):
         with warnings.catch_warnings():
             self.surrogate_model = instantiate_class(
-                self.surrogate_model_config,
+                self._surrogate_config_for_iter(),
                 train_x=train_x,
                 train_y=train_y,
             )
@@ -73,6 +95,7 @@ class BotorchOptimizer:
         design_space,
     ):
         self.train_surrogate_model(train_x, train_y)
+        self._bo_iter += 1
 
         additional_acq_function_params = self.update_acquisition_function_params(
             train_y

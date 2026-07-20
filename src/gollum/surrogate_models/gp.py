@@ -349,6 +349,12 @@ class DeepGP(SurrogateModel, SingleTaskGP):
             wandb.log(log)
             return mll_loss, grads
 
+        # Learned pooling weights are created lazily on the first forward; run one
+        # so they exist before the optimizer freezes the param list below.
+        if getattr(self.finetuning_model, "pooling_method", None) == "learned":
+            with torch.no_grad():
+                self.finetuning_model(self.train_x)
+
         self.optimizer = torch.optim.AdamW(
             [
                 {

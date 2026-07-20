@@ -160,6 +160,9 @@ class LLMFeaturizer(BaseNNFeaturizer):
         self.trainable = trainable
         self.embedding_dim = input_dim
         self.pooling_method = pooling_method
+        # Learned per-position pooling weights, materialised lazily on the first
+        # forward (sequence length is only known once we see the tokenised input).
+        self.pool_logits = None
         self.normalize_embeddings = normalize_embeddings
         self.input_dim = input_dim
 
@@ -239,6 +242,20 @@ class LLMFeaturizer(BaseNNFeaturizer):
                 pooled = last_token_pool(last_hidden_state, attn_mask)
             elif self.pooling_method == "weighted_average":
                 pooled = weighted_average_pool(last_hidden_state, attn_mask)
+            elif self.pooling_method == "learned":
+                if self.pool_logits is None:
+                    self.pool_logits = nn.Parameter(
+                        torch.zeros(
+                            last_hidden_state.size(1),
+                            device=last_hidden_state.device,
+                            dtype=last_hidden_state.dtype,
+                        )
+                    )
+                logits = self.pool_logits.unsqueeze(0).masked_fill(
+                    ~attn_mask.bool(), float("-inf")
+                )
+                alpha = torch.softmax(logits, dim=1)
+                pooled = torch.einsum("bt,btd->bd", alpha, last_hidden_state)
             else:
                 raise ValueError(
                     f"Unknown pooling method: {self.pooling_method}"
