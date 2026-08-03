@@ -135,61 +135,6 @@ class GP(SurrogateModel, SingleTaskGP):
         )
 
 
-class SparseArdGP(GP):
-    """GP with a sparse axis-aligned (ARD) Matérn kernel, sized to the input
-    dimension at construction time. Intended for the ESM-C SAE arm: a
-    sparsity-promoting Gamma lengthscale prior pushes most per-dimension
-    lengthscales large (irrelevant features) so the few biologically meaningful
-    SAE features dominate — the SAASBO idea, but using MAP fitting via
-    ``fit_gpytorch_mll`` so it keeps the standard posterior interface that the
-    acquisition functions and ranking metrics expect.
-    """
-
-    def __init__(
-        self,
-        train_x: Union[np.ndarray, torch.Tensor] = None,
-        train_y: Union[np.ndarray, torch.Tensor] = None,
-        likelihood: Union[GaussianLikelihood, None] = None,
-        mean_module: Union[Mean, None] = None,
-        standardize: bool = True,
-        normalize: bool = False,
-        initial_noise_val: float = 1e-4,
-        noise_constraint: float = 1e-5,
-        initial_outputscale_val: float = 1.0,
-        initial_lengthscale_val: float = 1.0,
-        gp_lr: float = 0.2,
-        nu: float = 2.5,
-        lengthscale_prior_concentration: float = 3.0,
-        lengthscale_prior_rate: float = 6.0,
-    ) -> None:
-        from gpytorch.kernels import ScaleKernel, MaternKernel
-        from gpytorch.priors import GammaPrior
-
-        ard_num_dims = train_x.shape[-1]
-        base_kernel = MaternKernel(
-            nu=nu,
-            ard_num_dims=ard_num_dims,
-            lengthscale_prior=GammaPrior(
-                lengthscale_prior_concentration, lengthscale_prior_rate
-            ),
-        )
-        covar_module = ScaleKernel(base_kernel)
-        super().__init__(
-            train_x=train_x,
-            train_y=train_y,
-            likelihood=likelihood,
-            covar_module=covar_module,
-            mean_module=mean_module,
-            standardize=standardize,
-            normalize=normalize,
-            initial_noise_val=initial_noise_val,
-            noise_constraint=noise_constraint,
-            initial_outputscale_val=initial_outputscale_val,
-            initial_lengthscale_val=initial_lengthscale_val,
-            gp_lr=gp_lr,
-        )
-
-
 class DeepGP(SurrogateModel, SingleTaskGP):
     def __init__(
         self,
@@ -278,10 +223,16 @@ class DeepGP(SurrogateModel, SingleTaskGP):
 
         self.to_gpu()
 
-    def forward(self, x):
+    def embed(self, x):
+        """Featurize + scale x into the space the kernel sees (what forward feeds
+        the mean/covar modules)."""
         finetuned = self.finetuning_model(x)
         if self.scale_embeddings:
             finetuned = self.scale_to_bounds(finetuned)
+        return finetuned
+
+    def forward(self, x):
+        finetuned = self.embed(x)
         self.finetuned = finetuned
 
         mean_x = self.mean_module(self.finetuned)
@@ -330,6 +281,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
             _dbg["step"] += 1
             print(
                 f"[fit] step {_dbg['step']:3d}  loss={mll_loss.item():.6f}  "
+                f"noise={self.likelihood.noise.detach().mean().item():.6f}  "
                 f"dt={_now - _dbg['t_prev']:.3f}s  total={_now - _dbg['t0']:.2f}s",
                 flush=True,
             )
@@ -375,6 +327,9 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         scheduler = StepLR(self.optimizer, step_size=1, gamma=0.95)
         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
 
+        # Recount now that any lazily-created pooling weights exist.
+        total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
         # Baseline embedding spread before any training step (fit_step=0).
         # Moved out of the fit loop; embedding spread is now logged once after the
         # fit completes (per epoch) — see end of fit().
@@ -417,6 +372,18 @@ class DeepGP(SurrogateModel, SingleTaskGP):
                 wandb.log({
                     "embed/median_pairwise_dist": torch.pdist(self._kernel_input()).median().item(),
                 })
+                # Learned pooling: line plot of the per-position weight (softmax of
+                # pool_logits) after training, to see which residues are weighted.
+                pool_logits = getattr(self.finetuning_model, "pool_logits", None)
+                if pool_logits is not None:
+                    alpha = torch.softmax(pool_logits.detach().float(), dim=0).cpu().tolist()
+                    table = wandb.Table(
+                        data=[[i, w] for i, w in enumerate(alpha)],
+                        columns=["position", "weight"],
+                    )
+                    wandb.log({"pool/position_weights": wandb.plot.line(
+                        table, "position", "weight",
+                        title="Learned pooling weight by position")})
 
     def predict(
         self, x, observation_noise=True, return_var=True, return_posterior=False

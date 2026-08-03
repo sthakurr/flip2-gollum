@@ -923,3 +923,6 @@ figures/
 data/
 
 caches/
+
+results/
+scripts/
