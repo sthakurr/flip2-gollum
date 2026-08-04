@@ -1,0 +1,85 @@
+# pllmphi (LoRA-finetuned ESM2 + 64-d projection) + mutation-site pooling + ARD.
+# Kernel sees the 64-d projection -> ARD ON (helpful on the reduced space; over
+# the raw 1280-d it overfits). UCB(b=1) to match the mutpool benchmark.
+# To drop ARD, set base_kernel.ard_num_dims: null (one-line toggle).
+data:
+  class_path: gollum.data.module.BaseDataModule
+  init_args:
+    data_path: data/flip2/alpha-amylase/one_to_many_train.csv
+    input_column: sequence
+    target_column: target
+    maximize: true
+    exclude_top: true
+    normalize_input: original
+    reduce_dim: null
+    featurizer:
+      class_path: gollum.data.module.Featurizer
+      init_args:
+        representation: get_tokens
+        model_name: facebook/esm2_t33_650M_UR50D
+        pooling_method: average       # ignored by get_tokens; pooling is in finetuning_model
+    initializer:
+      class_path: gollum.initialization.initializers.BOInitializer
+      init_args:
+        method: sobol
+        n_clusters: 96
+bo:
+  class_path: gollum.bo.optimizer.BotorchOptimizer
+  init_args:
+    batch_strategy: "kriging"
+    batch_size: 96
+    finetune_start_iter: 2   # freeze LoRA for first 2 BO iters (static features), then finetune
+acquisition:
+  class_path: botorch.acquisition.analytic.UpperConfidenceBound
+  init_args:
+    beta: 1.0
+    maximize: True
+surrogate_model:
+  class_path: gollum.surrogate_models.gp.DeepGP
+  init_args:
+    likelihood:
+      class_path: gpytorch.likelihoods.GaussianLikelihood
+      init_args:
+        noise_prior: null
+        noise_constraint: null
+        batch_shape:
+          class_path: torch.Size
+    covar_module:
+      class_path: gpytorch.kernels.ScaleKernel
+      init_args:
+        base_kernel:
+          class_path: gpytorch.kernels.MaternKernel
+          init_args:
+            nu: 2.5
+            ard_num_dims: 64          # ARD ON over the 64-d projection
+        outputscale_prior: null
+        ard_num_dims: null
+    mean_module:
+      class_path: gpytorch.means.ConstantMean
+    standardize: true
+    normalize: false
+    initial_noise_val: 1.0
+    noise_constraint: 1.0e-04
+    initial_outputscale_val: 1.0
+    initial_lengthscale_val: 1.0
+    gp_lr: 0.2
+    ft_lr: 0.002
+    train_mll_additionally: false
+    finetuning_model:
+      class_path: gollum.featurization.deep.LLMFeaturizer
+      init_args:
+        input_dim: 1280
+        projection_dim: 64            # projection -> kernel sees 64-d
+        from_top: true
+        target_ratio: 0.25
+        model_name: facebook/esm2_t33_650M_UR50D
+        pooling_method: mutation      # <-- mutation-site pooling
+        normalize_embeddings: false
+        lora_dropout: 0.01
+        trainable: true
+        lora_r: 4
+        lora_alpha: 16
+name: pllmphi_esm2_mutpool_ard
+phase1_iters: 5
+phase2_iters: 3
+seed: 0

@@ -1,0 +1,35 @@
+program: jobs/sweep_agent.sh
+method: grid
+project: gollum_flip2_acqfn_sweep
+name: baseline_ei_sweep
+description: >-
+  trpB 4-site BO sweep over 5 representation arms x 10 seeds x 2 datasets
+  (four_site_combinatorial -> trpB_4site, four_site_active150_250 -> trpB_4site_150-250).
+  phase1_iters=5, Phase-1 BO over the whole pool; kernel set per config.
+command:
+  - ${env}
+  - bash
+  - ${program}
+  - ${args_no_hyphens}
+parameters:
+  dataset:
+    values:
+      - combinatorial
+      - ired_multi
+      # - active150_250
+  rep:
+    values:
+      - onehot
+      - static_esm2
+      - pllm_esm2
+      - static_esmc
+      - pllm_esmc
+      # - llmphi_esm2
+      # - pllmphi_esm2
+      # - llmphi_esmc
+      # - pllmphi_esmc
+  seed:
+    values: [0, 1, 2, 3, 4]
+  acq:
+    # acquisition function (+beta folded into the ucb tokens to avoid grid dups)
+    values: [ei, logei, ucb0.1, ucb1, ucb4, greedy]

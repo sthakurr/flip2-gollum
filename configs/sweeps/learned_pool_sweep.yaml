@@ -1,0 +1,24 @@
+program: jobs/sweep_agent.sh
+method: grid
+project: gollum_flip2_learnedpool
+name: learned_pool_sweep
+description: >-
+  Learned per-position pool arm (LLMFeaturizer, frozen ESM2 backbone, only the
+  pool trains), 5 seeds. phase1_iters=5, Phase-1 BO over the whole pool.
+command:
+  - ${env}
+  - bash
+  - ${program}
+  - ${args_no_hyphens}
+parameters:
+  dataset:
+    values:
+      - trpb_two
+  rep:
+    values:
+      - learnedpool
+  seed:
+    values: [0, 1, 2, 3, 4]
+  acq:
+    # acquisition function (+beta folded into the ucb tokens to avoid grid dups)
+    values: [ucb1]

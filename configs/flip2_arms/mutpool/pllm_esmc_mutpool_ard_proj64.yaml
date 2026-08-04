@@ -1,0 +1,66 @@
+data:
+  class_path: gollum.data.module.BaseDataModule
+  init_args:
+    data_path: data/flip2/alpha-amylase/one_to_many_train.csv
+    input_column: sequence
+    target_column: target
+    maximize: true
+    exclude_top: true
+    normalize_input: original
+    reduce_dim: null
+    featurizer:
+      class_path: gollum.data.module.Featurizer
+      init_args:
+        representation: get_esmc_embeddings
+        model_name: esmc_600m
+        pooling_method: mutation
+        normalize_embeddings: false
+    initializer:
+      class_path: gollum.initialization.initializers.BOInitializer
+      init_args:
+        method: sobol
+        n_clusters: 96
+bo:
+  class_path: gollum.bo.optimizer.BotorchOptimizer
+  init_args:
+    batch_strategy: "kriging"
+    batch_size: 96
+acquisition:
+  class_path: botorch.acquisition.analytic.UpperConfidenceBound
+  init_args:
+    beta: 0.1                       # low beta -> exploitative
+    maximize: True
+surrogate_model:
+  class_path: gollum.surrogate_models.gp.DeepGP
+  init_args:
+    likelihood: null
+    covar_module:
+      class_path: gpytorch.kernels.ScaleKernel
+      init_args:
+        base_kernel:
+          class_path: gpytorch.kernels.MaternKernel
+          init_args:
+            nu: 2.5
+            ard_num_dims: 64
+        outputscale_prior: null
+        ard_num_dims: null
+    mean_module:
+      class_path: gpytorch.means.ConstantMean
+    standardize: true
+    normalize: false
+    initial_noise_val: 1.0
+    noise_constraint: 1.0e-04
+    initial_outputscale_val: 1.0
+    initial_lengthscale_val: 1.0
+    gp_lr: 0.2
+    ft_lr: 0.002                 
+    scale_embeddings: true
+    finetuning_model:
+      class_path: gollum.featurization.deep.ProjectionLayer
+      init_args:
+        input_dim: 1152          # ESM-C 600M hidden size — VERIFY for your checkpoint
+        projection_dim: 64         # trainable projection
+name: pllm_esmc_mutpool_ard_proj64
+phase1_iters: 5
+phase2_iters: 3
+seed: 0

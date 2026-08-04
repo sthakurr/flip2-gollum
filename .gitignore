@@ -911,7 +911,6 @@ tests/
 embeddings_cache/
 
 jobs/
-configs/
 
 .agents/
 skills-lock.json
@@ -926,3 +925,4 @@ caches/
 
 results/
 scripts/
+
