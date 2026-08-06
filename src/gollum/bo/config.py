@@ -1,7 +1,7 @@
 """Config assembly for BO runs: CLI overrides, validation, acquisition specs
 and W&B run naming.
 """
-CHECKPOINT_DIR = "/iopsstor/scratch/cscs/ssaumya/gollum/checkpoints"
+CHECKPOINT_DIR = "/scratch/saumya/gollum/checkpoints"
 
 MODEL_EMBEDDING_SIZES = {
     "WhereIsAI/UAE-Large-V1": 1024,

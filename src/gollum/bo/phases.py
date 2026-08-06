@@ -1,5 +1,5 @@
 """The BO phases: Phase-1 acquisition over the train pool, the train->test
-surrogate-quality gate, and Phase-2 acquisition over the test split.
+ranking eval, and Phase-2 acquisition over the test split.
 """
 import os
 
@@ -14,61 +14,47 @@ from gollum.metrics import (
     calculate_data_stats,
     calculate_ranking_metrics,
     log_bo_metrics,
-    log_prior_correlation,
-    log_surrogate_eval,
 )
 
 
-def run_gate(config, dm, bo):
-    """Surrogate-quality gate: fit the surrogate on the current train set (the
-    Phase-1-collected points) and evaluate how well it ranks the held-aside test
-    split. Answers "does this representation transfer train->test?". When run
-    after run_bo (mode=both) the train set is the full 96 + n_iters*batch points.
+def run_test_eval(config, dm, bo):
+    """How well does the Phase-1 model rank the held-aside test split?
+
+    Re-fits the surrogate on the full Phase-1 train set (Phase-1's last fit
+    predates the final acquired batch), then scores its predicted ranking of the
+    test set (spearman / kendall / recovery@k). Answers "does this
+    representation transfer data_path -> test_path?".
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if dm.test_x is None:
-        raise ValueError("Gate needs a held-aside test set; provide test_path.")
+        raise ValueError("test eval needs a held-aside test set; provide test_path.")
     train_x = dm.train_x.clone().to(device)
     train_y = dm.train_y.clone().to(device)
     test_x = dm.test_x.clone().to(device)
     test_y = dm.test_y.clone().to(device)
 
-    print(f"Gate: fitting on {train_x.shape[0]} train points, "
-          f"evaluating on {test_x.shape[0]} test points")
+    print(f"Test eval: fitting on {train_x.shape[0]} train points, "
+          f"ranking {test_x.shape[0]} test points")
     bo.train_surrogate_model(train_x, train_y)
 
-    epoch = config.get("n_iters", 0)
-    gate_full_eval_max = config.get("gate_full_eval_max", 5000)
+    # Runs right after Phase-1, so log it at the last Phase-1 epoch.
+    epoch = config.get("phase1_iters") or config.get("n_iters", 0)
 
-    if test_x.shape[0] <= gate_full_eval_max:
-        posterior = bo.surrogate_model.predict(test_x, return_posterior=True)
-        metrics = log_surrogate_eval(
-            posterior, test_y, stage="test", epoch=epoch
+    # Predictive mean only, chunked -> no N x N covariance, bounded DeepGP
+    # feature-map forward.
+    chunk = 2048
+    means = []
+    for start in range(0, test_x.shape[0], chunk):
+        mean_chunk = bo.surrogate_model.predict(
+            test_x[start:start + chunk], return_var=False
         )
-        log_prior_correlation(
-            bo.surrogate_model, train_x, test_x, stage="test", epoch=epoch,
-        )
-    else:
-        # Predictive mean only, chunked -> no N x N covariance, bounded DeepGP
-        # feature-map forward. Skips NLPD/MSLL/QCE + prior-corr (unused at scale).
-        print(
-            f"Gate: test set ({test_x.shape[0]}) > gate_full_eval_max "
-            f"({gate_full_eval_max}); computing rank metrics only "
-            f"(skipping fit metrics + prior_correlation)."
-        )
-        chunk = 2048
-        means = []
-        for start in range(0, test_x.shape[0], chunk):
-            mean_chunk = bo.surrogate_model.predict(
-                test_x[start:start + chunk], return_var=False
-            )
-            means.append(mean_chunk.detach().cpu())
-        preds = torch.cat(means, dim=0)
-        metrics = calculate_ranking_metrics(preds, test_y.cpu(), stage="test")
-        if wandb.run is not None:
-            wandb.log({**metrics, "epoch": epoch})
+        means.append(mean_chunk.detach().cpu())
+    preds = torch.cat(means, dim=0)
+    metrics = calculate_ranking_metrics(preds, test_y.cpu(), stage="test")
+    if wandb.run is not None:
+        wandb.log({**metrics, "epoch": epoch})
 
-    print("Gate metrics (train->test):")
+    print("Test metrics (train->test):")
     for k, v in metrics.items():
         print(f"  {k}: {v:.4f}")
     return metrics

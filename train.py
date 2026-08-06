@@ -2,8 +2,10 @@
 Training script for Gollum BO.
 
 Without --test_path: runs Phase-1 BO over the whole data_path pool.
-With --test_path: runs Phase-1 BO on data_path, a surrogate-quality gate
-(train->test), then Phase-2 BO over the test set seeded with the Phase-1 points.
+With --test_path: runs Phase-1 BO on data_path, then Phase-2 BO over the test
+set seeded with the Phase-1 points.
+--test_spearman true additionally scores how well the Phase-1 model ranks the
+test set (train->test generalisation); --phase2_iters 0 stops after that.
 
 Usage:
   python train.py --config configs/flip2_arms/static/static_esm2_dense.yaml \
@@ -49,6 +51,10 @@ def main():
     )
     parser.add_argument(
         "--phase2_iters", type=int, help="Phase-2 (test) BO iterations (full mode)"
+    )
+    parser.add_argument(
+        "--test_spearman", type=bool, default=False,
+        help="After Phase-1, score the surrogate's ranking of the test set (spearman etc.)",
     )
     parser.add_argument(
         "--seed_source",

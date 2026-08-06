@@ -1,5 +1,5 @@
 """Run orchestration: build the data module and optimizer from a config, then
-drive the phases (Phase-1 BO, gate, Phase-2 BO) inside a single W&B run.
+drive the phases (Phase-1 BO, test eval, Phase-2 BO) inside a single W&B run.
 """
 import logging
 import os
@@ -14,7 +14,7 @@ from gollum.bo.config import (
     validate_configuration,
 )
 from gollum.bo.optimizer import BotorchOptimizer
-from gollum.bo.phases import run_bo, run_gate, run_phase2
+from gollum.bo.phases import run_bo, run_phase2, run_test_eval
 from gollum.metrics import calculate_data_stats, log_data_stats
 from gollum.utils.config import flatten, instantiate_class
 from gollum.utils.runtime import pl_logger
@@ -58,6 +58,11 @@ def train(config):
     # Two-phase iff a test set is configured. mode label is for naming/logging only
     # (analysis scripts filter W&B runs on config.mode).
     has_test = config["data"]["init_args"].get("test_path") is not None
+    # test_spearman: score the Phase-1 model's ranking of the test set. Runs
+    # after Phase-1 and is independent of whether Phase-2 follows.
+    test_spearman = bool(config.get("test_spearman"))
+    if test_spearman and not has_test:
+        raise ValueError("--test_spearman needs a test set; provide --test_path.")
     mode = "full" if has_test else "bo"
     wandb_config["mode"] = mode
     run_name = make_run_name(config, mode)
@@ -76,7 +81,10 @@ def train(config):
         # Phase iteration counts: two-phase uses separate phase1/phase2 budgets;
         # Phase-1-only falls back to n_iters.
         phase1_iters = config.get("phase1_iters") or config.get("n_iters", 3)
-        phase2_iters = config.get("phase2_iters") or config.get("n_iters", 3)
+        # phase2_iters=0 -> Phase-1 (+ test eval) only.
+        phase2_iters = config.get("phase2_iters")
+        if phase2_iters is None:
+            phase2_iters = config.get("n_iters", 3)
 
         if not has_test:
             # Phase-1 BO only, over the whole data_path pool.
@@ -86,14 +94,16 @@ def train(config):
             # present-but-None when unset, so a plain .get would return None.
             seed_source = config.get("seed_source") or "phase1_bo"
             # phase1_bo seeds Phase-2 from the Phase-1-collected points, so it
-            # runs Phase-1 + gate first; the other baselines seed independently.
+            # runs Phase-1 first; the other baselines seed independently.
             if seed_source == "phase1_bo":
                 run_bo(config, dm, bo, data_stats, n_iters=phase1_iters)
-                run_gate(config, dm, bo)
-            run_phase2(
-                config, dm, bo, phase2_iters,
-                epoch_offset=phase1_iters + 1, seed_source=seed_source,
-            )
+                if test_spearman:
+                    run_test_eval(config, dm, bo)
+            if phase2_iters > 0:
+                run_phase2(
+                    config, dm, bo, phase2_iters,
+                    epoch_offset=phase1_iters + 1, seed_source=seed_source,
+                )
 
         # Save finetuned model if using DeepGP
         if config["surrogate_model"]["class_path"] == "gollum.surrogate_models.gp.DeepGP" and config["save_model"] == True:
