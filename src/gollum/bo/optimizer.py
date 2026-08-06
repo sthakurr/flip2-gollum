@@ -133,6 +133,21 @@ class BotorchOptimizer:
         return best_point, best_indices, acq_values
 
     def optimize_acquisition_function_batch(self, design_space):
+        # Acquisitions that pick the batch jointly (ensemble Thompson sampling draws
+        # one head per slot) can't be expressed as a top-k over per-point acq values.
+        select_batch = getattr(self.acquisition_function, "select_batch", None)
+        if select_batch is not None:
+            with torch.no_grad():
+                candidate_indices, candidate_acq_values = select_batch(
+                    design_space, self.batch_size
+                )
+            X = design_space.unsqueeze(-2)
+            return (
+                [X[i] for i in candidate_indices],
+                candidate_indices,
+                candidate_acq_values,
+            )
+
         _, _, acq_values = self.optimize_acquisition_function(design_space)
         k = min(self.batch_size, acq_values.shape[0])
         top = acq_values.topk(k)

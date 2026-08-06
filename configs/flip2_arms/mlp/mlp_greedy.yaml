@@ -1,0 +1,48 @@
+# Baseline arm: single MLP head on dense ESM-C embeddings, greedy (argmax mean).
+data:
+  class_path: gollum.data.module.BaseDataModule
+  init_args:
+    data_path: data/flip2/alpha-amylase/one_to_many_train.csv
+    input_column: sequence
+    target_column: target
+    maximize: true
+    exclude_top: true
+    normalize_input: standard_scaling
+    reduce_dim: null
+    featurizer:
+      class_path: gollum.data.module.Featurizer
+      init_args:
+        representation: get_esmc_embeddings
+        model_name: esmc_600m
+        pooling_method: average
+    initializer:
+      class_path: gollum.initialization.initializers.BOInitializer
+      init_args:
+        method: sobol
+        n_clusters: 96
+bo:
+  class_path: gollum.bo.optimizer.BotorchOptimizer
+  init_args:
+    batch_strategy: "kriging"
+    batch_size: 96
+acquisition:
+  class_path: botorch.acquisition.analytic.PosteriorMean
+  init_args:
+    maximize: True
+surrogate_model:
+  class_path: gollum.surrogate_models.mlp.MLP
+  init_args:
+    hidden_features: 128
+    num_layers: 1
+    activation: elu
+    n_heads: 1
+    lr: 3.0e-04
+    wd: 1.0e-03
+    batch_size: 32
+    max_epochs: 3000
+    patience: 100
+    clip_grad: 1.0
+name: mlp_greedy
+phase1_iters: 3
+phase2_iters: 3
+seed: 0
