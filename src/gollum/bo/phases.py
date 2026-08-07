@@ -12,8 +12,8 @@ from tqdm import tqdm
 from gollum.bo.config import CHECKPOINT_DIR
 from gollum.metrics import (
     calculate_data_stats,
-    calculate_ranking_metrics,
     log_bo_metrics,
+    log_surrogate_eval,
 )
 
 
@@ -22,8 +22,9 @@ def run_test_eval(config, dm, bo):
 
     Re-fits the surrogate on the full Phase-1 train set (Phase-1's last fit
     predates the final acquired batch), then scores its predicted ranking of the
-    test set (spearman / kendall / recovery@k). Answers "does this
-    representation transfer data_path -> test_path?".
+    test set (spearman / kendall / recovery@k) and the calibration of its
+    posterior (nlpd / msll / qce / r2 / mse). Answers "does this representation
+    transfer data_path -> test_path?".
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if dm.test_x is None:
@@ -40,19 +41,8 @@ def run_test_eval(config, dm, bo):
     # Runs right after Phase-1, so log it at the last Phase-1 epoch.
     epoch = config.get("phase1_iters") or config.get("n_iters", 0)
 
-    # Predictive mean only, chunked -> no N x N covariance, bounded DeepGP
-    # feature-map forward.
-    chunk = 2048
-    means = []
-    for start in range(0, test_x.shape[0], chunk):
-        mean_chunk = bo.surrogate_model.predict(
-            test_x[start:start + chunk], return_var=False
-        )
-        means.append(mean_chunk.detach().cpu())
-    preds = torch.cat(means, dim=0)
-    metrics = calculate_ranking_metrics(preds, test_y.cpu(), stage="test")
-    if wandb.run is not None:
-        wandb.log({**metrics, "epoch": epoch})
+    posterior = bo.surrogate_model.predict(test_x, return_posterior=True)
+    metrics = log_surrogate_eval(posterior, test_y, stage="test", epoch=epoch)
 
     print("Test metrics (train->test):")
     for k, v in metrics.items():

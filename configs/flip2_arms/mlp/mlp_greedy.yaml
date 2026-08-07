@@ -23,7 +23,7 @@ data:
 bo:
   class_path: gollum.bo.optimizer.BotorchOptimizer
   init_args:
-    batch_strategy: "kriging"
+    batch_strategy: "topk"
     batch_size: 96
 acquisition:
   class_path: botorch.acquisition.analytic.PosteriorMean

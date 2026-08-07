@@ -26,7 +26,7 @@ data:
 bo:
   class_path: gollum.bo.optimizer.BotorchOptimizer
   init_args:
-    batch_strategy: "kriging"
+    batch_strategy: "topk"
     batch_size: 96
     finetune_start_iter: 2   # freeze LoRA for first 2 BO iters (static features), then finetune
 acquisition:

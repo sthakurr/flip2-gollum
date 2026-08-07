@@ -22,11 +22,12 @@ data:
 bo:
   class_path: gollum.bo.optimizer.BotorchOptimizer
   init_args:
-    batch_strategy: "kriging"
+    batch_strategy: "topk"
     batch_size: 96
 acquisition:
-  class_path: botorch.acquisition.analytic.ExpectedImprovement
+  class_path: botorch.acquisition.analytic.UpperConfidenceBound
   init_args:
+    beta: 1.0
     maximize: True
 surrogate_model:
   class_path: gollum.surrogate_models.gp.DeepGP
