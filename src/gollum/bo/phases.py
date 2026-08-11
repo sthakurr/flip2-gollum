@@ -34,9 +34,11 @@ def log_acq_topk(dm, scores, iteration, top_n=200):
     with open(path, "a", newline="") as fh:
         w = csv.writer(fh)
         if write_header:
-            w.writerow(["iter", "rank", "acq_value", "index", "sequence"])
+            w.writerow(["iter", "rank", "acq_value", "index", "sequence", "fitness"])
         for rank, (idx, val) in enumerate(zip(orig, top.values.tolist())):
-            w.writerow([iteration, rank, val, int(idx), dm.data.loc[int(idx), dm.input_column]])
+            row = dm.data.loc[int(idx)]
+            w.writerow([iteration, rank, val, int(idx),
+                        row[dm.input_column], row[dm.target_column]])
 
 
 def run_test_eval(config, dm, bo):
