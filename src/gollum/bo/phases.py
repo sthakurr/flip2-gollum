@@ -17,6 +17,28 @@ from gollum.metrics import (
 )
 
 
+def log_acq_topk(dm, scores, iteration, top_n=200):
+    """Append the top-`top_n` design-space sequences by acquisition value to
+    CHECKPOINT_DIR/<run>/acq_topk_sequences.csv (one block per BO iteration).
+    No-op if `scores` is None (acquisition paths that don't set them)."""
+    if scores is None:
+        return
+    import csv
+    scores = scores.reshape(-1).cpu()
+    top = torch.topk(scores, min(top_n, scores.numel()))
+    orig = np.asarray(dm.heldout_indices)[top.indices.numpy()]
+    out_dir = os.path.join(CHECKPOINT_DIR, wandb.run.name if wandb.run else "default")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "acq_topk_sequences.csv")
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as fh:
+        w = csv.writer(fh)
+        if write_header:
+            w.writerow(["iter", "rank", "acq_value", "index", "sequence"])
+        for rank, (idx, val) in enumerate(zip(orig, top.values.tolist())):
+            w.writerow([iteration, rank, val, int(idx), dm.data.loc[int(idx), dm.input_column]])
+
+
 def run_test_eval(config, dm, bo):
     """How well does the Phase-1 model rank the held-aside test split?
 
@@ -96,6 +118,7 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
         x_next = bo.suggest_next_experiments(train_x, train_y, design_space)
         if diag is not None:
             diag.record(bo.surrogate_model, i)
+        log_acq_topk(dm, getattr(bo, "last_acq_scores", None), i)  # comment out to disable
         x_next = torch.stack(x_next)
 
         log_bo_metrics(data_stats, dm.train_y, epoch=i)
