@@ -17,6 +17,20 @@ from gollum.metrics import (
 )
 
 
+def _run_out_dir():
+    """Per-run output dir under CHECKPOINT_DIR, falling back to ./logs when that
+    path isn't writable (e.g. the cluster scratch path on a local machine)."""
+    name = wandb.run.name if wandb.run else "default"
+    for base in (CHECKPOINT_DIR, "logs"):
+        try:
+            out = os.path.join(base, name)
+            os.makedirs(out, exist_ok=True)
+            return out
+        except OSError:
+            continue
+    raise OSError("no writable output directory for run logs")
+
+
 def log_acq_topk(dm, scores, iteration, top_n=200):
     """Append the top-`top_n` design-space sequences by acquisition value to
     CHECKPOINT_DIR/<run>/acq_topk_sequences.csv (one block per BO iteration).
@@ -27,9 +41,7 @@ def log_acq_topk(dm, scores, iteration, top_n=200):
     scores = scores.reshape(-1).cpu()
     top = torch.topk(scores, min(top_n, scores.numel()))
     orig = np.asarray(dm.heldout_indices)[top.indices.numpy()]
-    out_dir = os.path.join(CHECKPOINT_DIR, wandb.run.name if wandb.run else "default")
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "acq_topk_sequences.csv")
+    path = os.path.join(_run_out_dir(), "acq_topk_sequences.csv")
     write_header = not os.path.exists(path)
     with open(path, "a", newline="") as fh:
         w = csv.writer(fh)
@@ -38,6 +50,23 @@ def log_acq_topk(dm, scores, iteration, top_n=200):
         for rank, (idx, val) in enumerate(zip(orig, top.values.tolist())):
             row = dm.data.loc[int(idx)]
             w.writerow([iteration, rank, val, int(idx),
+                        row[dm.input_column], row[dm.target_column]])
+
+
+def log_acquired(dm, original_indices, iteration):
+    """Append the Phase-1 batch acquired at `iteration` to
+    CHECKPOINT_DIR/<run>/acquired_sequences.csv, with each sequence's true
+    fitness. `original_indices` index into dm.data."""
+    import csv
+    path = os.path.join(_run_out_dir(), "acquired_sequences.csv")
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as fh:
+        w = csv.writer(fh)
+        if write_header:
+            w.writerow(["iter", "index", "sequence", "fitness"])
+        for idx in np.asarray(original_indices).tolist():
+            row = dm.data.loc[int(idx)]
+            w.writerow([iteration, int(idx),
                         row[dm.input_column], row[dm.target_column]])
 
 
@@ -136,6 +165,7 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
 
         # update indices tracking
         evaluated_original_indices = dm.heldout_indices[indices]
+        log_acquired(dm, evaluated_original_indices, i)
         dm.train_indexes = np.append(dm.train_indexes, evaluated_original_indices)
         dm.heldout_indices = np.delete(dm.heldout_indices, indices)
 
