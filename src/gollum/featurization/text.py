@@ -260,6 +260,97 @@ def _mutation_pool(hidden, attn, batch_texts, consensus, cons_hidden=None):
     return torch.stack(out)
 
 
+def _mutation_context_topk_pool(
+    hidden,
+    attn,
+    batch_texts,
+    consensus,
+    cons_hidden=None,
+    top_k=4,
+    locality=0.5,
+    temperature=1.0,
+):
+    """Pool mutation-centred token contexts selected by contextual relevance.
+
+    For every mutated residue, the mutation token is combined with the ``top_k``
+    other residue tokens ranked by cosine similarity to it, with a logarithmic
+    sequence-distance penalty controlled by ``locality``. The selected tokens
+    are softmax-weighted, then the per-mutation context vectors are averaged.
+
+    When ``cons_hidden`` is supplied, relevance and pooling operate on the
+    contextual response ``hidden(mutant) - hidden(consensus)``. ``top_k=0``
+    exactly reduces to the existing mutation-only pooling rule. The output has
+    shape ``(batch, hidden_dim)``, matching :func:`_mutation_pool`.
+    """
+    if top_k < 0:
+        raise ValueError(f"top_k must be non-negative, got {top_k}.")
+    if locality < 0:
+        raise ValueError(f"locality must be non-negative, got {locality}.")
+    if temperature <= 0:
+        raise ValueError(f"temperature must be positive, got {temperature}.")
+
+    out = []
+    token_values = hidden if cons_hidden is None else hidden - cons_hidden
+    token_values_normalized = F.normalize(token_values.float(), p=2, dim=-1)
+    token_count = hidden.shape[1]
+
+    for batch_idx, sequence in enumerate(batch_texts):
+        # Protein tokenizers used here place a BOS/CLS token before residue 0,
+        # so residue position i maps to token position i + 1, as in
+        # ``_mutation_pool`` above.
+        residue_indices = [
+            position + 1
+            for position in range(min(len(sequence), len(consensus)))
+            if position + 1 < token_count and bool(attn[batch_idx, position + 1])
+        ]
+        mutation_indices = [
+            position + 1
+            for position, residue in enumerate(sequence)
+            if (
+                position < len(consensus)
+                and residue != consensus[position]
+                and position + 1 < token_count
+                and bool(attn[batch_idx, position + 1])
+            )
+        ]
+
+        mutation_contexts = []
+        for mutation_idx in mutation_indices:
+            other_indices = [idx for idx in residue_indices if idx != mutation_idx]
+            selected_indices = [mutation_idx]
+            selected_scores = token_values.new_tensor([1.0])
+
+            if top_k and other_indices:
+                candidates = torch.tensor(other_indices, device=hidden.device)
+                query = token_values_normalized[batch_idx, mutation_idx]
+                similarities = token_values_normalized[batch_idx, candidates] @ query
+                distances = (candidates - mutation_idx).abs().to(similarities.dtype)
+                scores = similarities - locality * torch.log1p(distances)
+                k = min(top_k, scores.numel())
+                top = scores.topk(k)
+                selected_indices.extend(candidates[top.indices].tolist())
+                selected_scores = torch.cat(
+                    [selected_scores, top.values.to(selected_scores.dtype)]
+                )
+
+            indices = torch.tensor(selected_indices, device=hidden.device)
+            weights = torch.softmax(selected_scores / temperature, dim=0).to(hidden.dtype)
+            context = (token_values[batch_idx, indices] * weights.unsqueeze(-1)).sum(dim=0)
+            mutation_contexts.append(context)
+
+        if mutation_contexts:
+            out.append(torch.stack(mutation_contexts).mean(dim=0))
+        elif cons_hidden is not None:
+            out.append(torch.zeros(hidden.shape[-1], device=hidden.device, dtype=hidden.dtype))
+        else:
+            mask = attn[batch_idx].unsqueeze(-1).to(hidden.dtype)
+            out.append(
+                (hidden[batch_idx] * mask).sum(dim=0) / mask.sum().clamp_min(1)
+            )
+
+    return torch.stack(out)
+
+
 def get_huggingface_embeddings(
     texts,
     model_name="tiiuae/falcon-7b",
@@ -271,6 +362,9 @@ def get_huggingface_embeddings(
     device="cuda" if torch.cuda.is_available() else "cpu",
     normalize_embeddings=False,
     use_cache=True,
+    mutation_top_k=4,
+    mutation_locality=0.5,
+    mutation_temperature=1.0,
 ):
     """
     General function to get embeddings from a HuggingFace transformer model. \
@@ -285,13 +379,23 @@ def get_huggingface_embeddings(
         max_length = 512
     texts = list(texts)
     wt_seq = _consensus(texts) if wt_ref else None
-    mut_consensus = (
-        _consensus(texts) if pooling_method in ("mutation", "mutation_delta") else None
+    mutation_pooling_methods = (
+        "mutation",
+        "mutation_delta",
+        "mutation_context_topk",
+        "mutation_context_topk_delta",
+    )
+    mut_consensus = _consensus(texts) if pooling_method in mutation_pooling_methods else None
+    context_cache_tag = (
+        f"_k{mutation_top_k}_loc{mutation_locality}_temp{mutation_temperature}"
+        if pooling_method in ("mutation_context_topk", "mutation_context_topk_delta")
+        else ""
     )
     cache = (
         _cache_path(
             f"hf_{model_name}_{pooling_method}_L{max_length}"
-            f"_norm{int(normalize_embeddings)}_pre{prefix}_wtref{int(wt_ref)}",
+            f"_norm{int(normalize_embeddings)}_pre{prefix}_wtref{int(wt_ref)}"
+            f"{context_cache_tag}",
             texts,
         )
         if use_cache
@@ -352,6 +456,24 @@ def get_huggingface_embeddings(
                     mut_consensus,
                     cons_hidden=cons_hidden if pooling_method == "mutation_delta" else None,
                 )
+            if pooling_method in (
+                "mutation_context_topk",
+                "mutation_context_topk_delta",
+            ):
+                return _mutation_context_topk_pool(
+                    outputs.last_hidden_state,
+                    encoded_input["attention_mask"],
+                    batch_texts,
+                    mut_consensus,
+                    cons_hidden=(
+                        cons_hidden
+                        if pooling_method == "mutation_context_topk_delta"
+                        else None
+                    ),
+                    top_k=mutation_top_k,
+                    locality=mutation_locality,
+                    temperature=mutation_temperature,
+                )
             return pooling_functions[pooling_method](
                 outputs.last_hidden_state, encoded_input["attention_mask"]
             )
@@ -360,7 +482,7 @@ def get_huggingface_embeddings(
 
     # Per-token consensus hidden states for site-wise delta pooling.
     cons_hidden = None
-    if pooling_method == "mutation_delta":
+    if pooling_method in ("mutation_delta", "mutation_context_topk_delta"):
         enc = tokenizer(
             [mut_consensus], padding=True, truncation=True,
             max_length=max_length, return_tensors="pt",
@@ -656,7 +778,6 @@ def get_esmc_sae_features(
     if n_dropped:
         print(f"SAE: dropping {n_dropped} inactive/constant features, keeping {int(keep.sum())}")
     return feats[:, keep].astype(np.float32)
-
 
 
 

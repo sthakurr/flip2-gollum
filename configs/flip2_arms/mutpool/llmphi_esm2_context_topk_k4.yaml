@@ -1,0 +1,77 @@
+# LoRA-trainable ESM2 + differentiable mutation-conditioned top-k context pooling.
+# Set mutation_top_k: 0 to recover the original token_mutation_pool exactly while
+# retaining the same LoRA training path.
+data:
+  class_path: gollum.data.module.BaseDataModule
+  init_args:
+    data_path: data/flip2/alpha-amylase/one_to_many_train.csv
+    input_column: sequence
+    target_column: target
+    maximize: true
+    exclude_top: true
+    normalize_input: original
+    reduce_dim: null
+    featurizer:
+      class_path: gollum.data.module.Featurizer
+      init_args:
+        representation: get_tokens
+        model_name: facebook/esm2_t33_650M_UR50D
+        pooling_method: average  # ignored by get_tokens; pooling occurs below
+    initializer:
+      class_path: gollum.initialization.initializers.BOInitializer
+      init_args:
+        method: sobol
+        n_clusters: 96
+bo:
+  class_path: gollum.bo.optimizer.BotorchOptimizer
+  init_args:
+    batch_strategy: "topk"
+    batch_size: 96
+    finetune_start_iter: 0  # LoRA is trainable from the first BO iteration
+acquisition:
+  class_path: botorch.acquisition.analytic.UpperConfidenceBound
+  init_args:
+    beta: 1.0
+    maximize: true
+surrogate_model:
+  class_path: gollum.surrogate_models.gp.DeepGP
+  init_args:
+    likelihood: null
+    covar_module:
+      class_path: gpytorch.kernels.ScaleKernel
+      init_args:
+        base_kernel:
+          class_path: gpytorch.kernels.MaternKernel
+          init_args:
+            nu: 2.5
+            ard_num_dims: null
+        outputscale_prior: null
+        ard_num_dims: null
+    mean_module:
+      class_path: gpytorch.means.ConstantMean
+    standardize: true
+    normalize: false
+    initial_noise_val: 1.0
+    noise_constraint: 1.0e-04
+    gp_lr: 0.2
+    ft_lr: 0.002
+    train_mll_additionally: false
+    finetuning_model:
+      class_path: gollum.featurization.deep.LLMFeaturizer
+      init_args:
+        input_dim: 1280
+        projection_dim: null
+        from_top: true
+        target_ratio: 0.25
+        model_name: facebook/esm2_t33_650M_UR50D
+        pooling_method: mutation_context_topk
+        mutation_top_k: 4
+        mutation_locality: 0.5
+        mutation_temperature: 1.0
+        normalize_embeddings: false
+        lora_dropout: 0.2
+        trainable: true
+name: llmphi_esm2_context_topk_k4
+phase1_iters: 5
+phase2_iters: 3
+seed: 0
