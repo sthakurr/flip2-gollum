@@ -4,9 +4,9 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import cdist
 from gollum.featurization.text import get_tokens, get_huggingface_embeddings
 
-# One-hot encoding now lives in gollum.featurization.protein (single source of
+# One-hot encoding now lives in gollum.featurization.onehot (single source of
 # truth, no matplotlib import cost). Re-exported here for backward compatibility.
-from gollum.featurization.protein import one_hot_encode_sequences, one_hot_matrix
+from gollum.featurization.onehot import one_hot_encode_sequences, one_hot_matrix
 
 
 def viz_distances(data, split=False, onehot=False, enz_split=None):

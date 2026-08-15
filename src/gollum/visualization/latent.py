@@ -12,6 +12,7 @@ import torch
 import wandb
 import matplotlib.pyplot as plt
 from umap import UMAP
+from sklearn.manifold import TSNE
 
 
 def pairwise_distances(emb, y):
@@ -74,7 +75,8 @@ class LatentDiagnostics:
         if self.plot_dist:
             self.plot_distances()
         if self.viz_latent:
-            self.plot_evolution()
+            self.plot_evolution("umap", lambda emb: UMAP(n_components=2, random_state=42).fit_transform(emb))
+            self.plot_evolution("tsne", lambda emb: TSNE(n_components=2, random_state=42).fit_transform(emb))
 
     def plot_distances(self):
         epochs = [r["epoch"] for r in self.records]
@@ -89,20 +91,20 @@ class LatentDiagnostics:
         fig.tight_layout()
         self.save_fig(fig, "distances")
 
-    def plot_evolution(self):
+    def plot_evolution(self, name, reduce):
         y = self.viz_y.numpy()
         n = len(self.records)
         fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), squeeze=False)
         flat = axes.ravel()
         for ax_i, rec in enumerate(self.records):
-            xy = UMAP(n_components=2, random_state=42).fit_transform(rec["emb"].numpy())
+            xy = reduce(rec["emb"].numpy())
             sc = flat[ax_i].scatter(xy[:, 0], xy[:, 1], c=y, cmap="viridis", s=8, alpha=0.7)
             flat[ax_i].set_title(f"epoch {rec['epoch']}")
             flat[ax_i].set_xticks([])
             flat[ax_i].set_yticks([])
         fig.colorbar(sc, ax=axes.ravel().tolist(), label="target", shrink=0.6)
-        fig.suptitle("Latent space evolution (UMAP)")
-        self.save_fig(fig, "latent_evolution")
+        fig.suptitle(f"Latent space evolution ({name.upper()})")
+        self.save_fig(fig, f"latent_evolution_{name}")
 
     def save_fig(self, fig, name):
         if wandb.run is not None:
