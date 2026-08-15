@@ -616,6 +616,9 @@ def get_esmc_embeddings(
     device="cuda" if torch.cuda.is_available() else "cpu",
     normalize_embeddings=False,
     use_cache=True,
+    mutation_top_k=4,
+    mutation_locality=0.5,
+    mutation_temperature=1.0,
 ):
     """Mean-pooled ESM-C (ESM Cambrian) per-sequence embeddings.
 
@@ -627,9 +630,15 @@ def get_esmc_embeddings(
     Raises a clear ImportError if ``esm`` is missing so the sweep can skip ESM-C.
     """
     texts = list(texts)
-    mut_consensus = _consensus(texts) if pooling_method == "mutation" else None
+    mut_poolings = ("mutation", "mutation_context_topk")
+    mut_consensus = _consensus(texts) if pooling_method in mut_poolings else None
+    topk_tag = (
+        f"_k{mutation_top_k}_loc{mutation_locality}_temp{mutation_temperature}"
+        if pooling_method == "mutation_context_topk"
+        else ""
+    )
     cache = (
-        _cache_path(f"esmc_{model_name}_{pooling_method}_norm{int(normalize_embeddings)}", texts)
+        _cache_path(f"esmc_{model_name}_{pooling_method}{topk_tag}_norm{int(normalize_embeddings)}", texts)
         if use_cache
         else None
     )
@@ -676,6 +685,12 @@ def get_esmc_embeddings(
                 model_out = client(sequence_tokens=input_ids)
                 if pooling_method == "mutation":
                     pooled = _mutation_pool(model_out.embeddings, attn, batch, mut_consensus)
+                elif pooling_method == "mutation_context_topk":
+                    pooled = _mutation_context_topk_pool(
+                        model_out.embeddings, attn, batch, mut_consensus,
+                        top_k=mutation_top_k, locality=mutation_locality,
+                        temperature=mutation_temperature,
+                    )
                 else:
                     pooled = esmc_pool(model_out.embeddings, attn, pooling_method)
             out_list.append(_normalize_and_np(pooled))
@@ -706,6 +721,13 @@ def get_esmc_embeddings(
                         pooled = emb[0, torch.tensor(idx, device=emb.device)].mean(0, keepdim=True)
                     else:
                         pooled = emb[0, 1:-1, :].mean(dim=0, keepdim=True)
+                elif pooling_method == "mutation_context_topk":
+                    attn = torch.ones(1, emb.shape[1], device=emb.device)
+                    pooled = _mutation_context_topk_pool(
+                        emb, attn, [seq], mut_consensus,
+                        top_k=mutation_top_k, locality=mutation_locality,
+                        temperature=mutation_temperature,
+                    )
                 else:
                     raise ValueError(f"Unsupported pooling_method: {pooling_method}")
             out_list.append(_normalize_and_np(pooled))
