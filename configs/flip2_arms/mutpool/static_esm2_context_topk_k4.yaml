@@ -1,0 +1,63 @@
+# Frozen ESM2 + mutation-conditioned top-k context pooling + standard GP.
+# Set mutation_top_k: 0 to recover the original mutation-only pooling exactly.
+data:
+  class_path: gollum.data.module.BaseDataModule
+  init_args:
+    data_path: data/flip2/alpha-amylase/one_to_many_train.csv
+    input_column: sequence
+    target_column: target
+    maximize: true
+    exclude_top: true
+    normalize_input: standard_scaling
+    reduce_dim: null
+    featurizer:
+      class_path: gollum.data.module.Featurizer
+      init_args:
+        representation: get_huggingface_embeddings
+        model_name: facebook/esm2_t33_650M_UR50D
+        pooling_method: mutation_context_topk
+        mutation_top_k: 4
+        mutation_locality: 0.5
+        mutation_temperature: 1.0
+        normalize_embeddings: false
+    initializer:
+      class_path: gollum.initialization.initializers.BOInitializer
+      init_args:
+        method: sobol
+        n_clusters: 96
+bo:
+  class_path: gollum.bo.optimizer.BotorchOptimizer
+  init_args:
+    batch_strategy: "topk"
+    batch_size: 96
+acquisition:
+  class_path: botorch.acquisition.analytic.UpperConfidenceBound
+  init_args:
+    beta: 1.0
+    maximize: true
+surrogate_model:
+  class_path: gollum.surrogate_models.gp.GP
+  init_args:
+    likelihood: null
+    covar_module:
+      class_path: gpytorch.kernels.ScaleKernel
+      init_args:
+        base_kernel:
+          class_path: gpytorch.kernels.MaternKernel
+          init_args:
+            nu: 2.5
+            ard_num_dims: null
+        outputscale_prior: null
+        ard_num_dims: null
+    mean_module:
+      class_path: gpytorch.means.ConstantMean
+    standardize: true
+    normalize: false
+    initial_noise_val: 1.0
+    noise_constraint: 1.0e-04
+    initial_outputscale_val: 1.0
+    initial_lengthscale_val: 1.0
+name: static_esm2_context_topk_k4
+phase1_iters: 5
+phase2_iters: 3
+seed: 0
