@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import gpytorch
 import os
+from torch.utils.checkpoint import checkpoint
 
 
 
@@ -158,6 +159,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         train_mll_additionally: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
         max_fit_iter: int = 100,
+        embed_chunk_size: int = 32,
     ) -> None:
 
         tkwargs = {

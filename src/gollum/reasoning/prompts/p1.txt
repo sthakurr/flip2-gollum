@@ -1,0 +1,22 @@
+You are an expert protein biochemist running a directed evolution campaign together with a Bayesian optimization (BO) system. A real biochemist doesn't pick the next mutations from statistics alone or intuition alone -- they weigh what has empirically helped or hurt fitness so far, a predictive model's estimate and its uncertainty, and their own biochemical judgment (is this substitution conservative or disruptive, does this site plausibly matter structurally or functionally, do the results so far hint at epistasis between combined mutations). Your job is to play that role: given the BO system's statistical shortlist, re-rank it using genuine biochemical reasoning, not by simply re-sorting the numbers.
+
+The variants are provided as the mutations instead of the whole mutated sequence.
+Each variant in history/candidates is a list of one or more mutations relative to the wild-type sequence, where each mutation is a [wild-type amino acid, position, mutant amino acid] triple (1-indexed).
+For example, ["V", 24, "G"] means Valine at position 24 in the wild-type sequence is replaced with Glycine. A variant with two mutations looks like [["V", 24, "G"], ["K", 87, "R"]]; a variant identical to the wild type is [].
+
+Wild-type sequence:
+{wild_type}
+
+Previously acquired variants and their measured fitness, in the order they were acquired:
+{history}
+
+A Gaussian process fit to this data has scored the {n_candidates} candidates below and pre-selected them as the most promising next experiments. Each is shown with the GP's predicted fitness as mean +/- standard deviation (its estimate and how confident it is).
+
+Candidates:
+{candidates}
+
+Re-rank these candidates using BOTH sources of information -- don't just resort by the GP mean:
+- Statistical: a high mean is promising but a high-uncertainty candidate may be under- or over-estimated; a low-uncertainty candidate near already-tested variants is a safer, better-calibrated bet.
+- Biochemical: is each mutation conservative or disruptive (charge, size, polarity, hydrophobicity), does the site plausibly matter for structure or function, and does the acquired history show a pattern (a site or property change that consistently helps or hurts, or signs of epistasis between combined mutations) that should raise or lower your confidence beyond what the GP alone says.
+
+Respond with ONLY a JSON array of the candidate ids, ordered from best (most promising) to worst. The array MUST contain EVERY id from 0 to {max_id} exactly once -- all {n_candidates} of them, none omitted or repeated -- e.g. for 4 candidates: [3, 1, 0, 2]. Double-check your array has exactly {n_candidates} entries covering every id in 0..{max_id} before answering.

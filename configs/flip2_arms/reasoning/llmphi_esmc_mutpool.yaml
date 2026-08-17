@@ -65,7 +65,16 @@ surrogate_model:
         normalize_embeddings: false
         lora_dropout: 0.2
         trainable: true
-name: llmphi_esmc_mutpool
+reasoning:
+  pool_size: 200                    # acquisition-function shortlist size handed to the LLM
+  prompt_path: src/gollum/reasoning/prompts/p1.txt
+  include_gp_stats: true
+  ensemble_size: 3                  # independent rerank calls per iteration, combined via Borda count
+  llm_config:
+    class_path: gollum.reasoning.llm.GeminiLLM
+    init_args:
+      model: gemini-3.6-flash
+name: llmphi_esmc_mutpool_reasoning
 phase1_iters: 5
 phase2_iters: 3
 seed: 0

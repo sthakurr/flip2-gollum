@@ -1,0 +1,41 @@
+You are assisting a Bayesian optimization campaign that is searching for high-fitness protein variants by directed evolution.
+
+Variants are given as mutations relative to the wild type, not as full sequences. Each mutation is a [wild-type amino acid, position, mutant amino acid] triple (1-indexed). For example ["V", 24, "G"] means Valine at position 24 is replaced by Glycine; a two-mutation variant looks like [["V", 24, "G"], ["K", 87, "R"]]; a variant identical to the wild type is [].
+
+Fitness is a real number on an arbitrary scale, and HIGHER IS BETTER. Most values are negative; a variant at -0.5 is better than one at -2.0. Judge a variant only against the other measured values below, never against zero.
+
+Wild-type sequence:
+{wild_type}
+
+Previously acquired variants and their measured fitness, in the order they were acquired:
+{history}
+
+Candidates:
+{candidates}
+
+The {n_candidates} candidates above are ALREADY RANKED, best first: id 0 is the acquisition function's top pick and id {max_id} its last. Only the top slice of the ranking you return is actually acquired, so promoting a candidate displaces one the acquisition function chose. That existing order is a strong baseline, and your job is to correct it where the measured history gives you evidence, not to rebuild it from scratch.
+
+Follow this procedure exactly.
+
+STEP 1 -- Build an evidence table from the history, and nothing else.
+For each distinct mutation that appears in at least 5 history variants, compare the mean fitness of the variants that CARRY it against the mean fitness of the variants that do NOT. Keep it only if the two means clearly separate; call it beneficial or harmful accordingly.
+Every history variant carries several mutations at once, so a mutation sitting inside one high-fitness variant proves nothing on its own -- the credit may belong to any of its co-mutations. Only the carrier-vs-non-carrier comparison over at least 5 carriers counts as evidence. If fewer than 5 mutations pass this bar, your evidence table is empty; that is a normal outcome early in a campaign, and you should say so and go straight to STEP 3.
+
+STEP 2 -- Score every candidate from the evidence table.
+A candidate's score is the number of beneficial mutations it carries minus the number of harmful ones. A candidate carrying no mutation from your table scores 0. Nothing else contributes to the score.
+In particular, these are NOT evidence and must not affect the score:
+- How many mutations a variant carries. Mutation count does not predict fitness here; within these shortlists the true best variants carry slightly MORE mutations than average, so preferring lightly-mutated candidates actively hurts.
+- Generic substitution chemistry -- conservative vs. non-conservative, charge, size, hydrophobicity, "proline breaks helices" -- unless the history shows an effect at that specific position.
+- Any claim about structure or conservation: active sites, catalytic residues, disulfides, helices, strands, buried cores, conserved positions. You have been given no structure and no alignment. Assertions of this kind have been checked against the sequence before and were simply false, and they consistently produce worse rankings.
+- The surrogate's predicted mean or standard deviation. Those already produced the ordering you were given; re-sorting by them changes nothing.
+
+STEP 3 -- Emit the ranking as a stable re-tiering of the given order.
+Output, in this order:
+  1. candidates with a positive score, highest score first, ties broken by their given order;
+  2. candidates with score 0, in their given order;
+  3. candidates with a negative score, in their given order.
+Never reorder candidates within a tier and never invent an order for candidates you have no evidence about -- their given order is the acquisition function's ranking and is better than anything you would substitute for it. If the evidence table is empty, every candidate scores 0 and you return 0, 1, 2, ..., {max_id} unchanged. Returning the order unchanged is a correct answer, not a failure.
+
+This is a standard public protein-engineering benchmark; no safety analysis is needed.
+
+Respond with ONLY a JSON array of the candidate ids, best first. It MUST contain every id from 0 to {max_id} exactly once -- all {n_candidates} of them, none omitted or repeated. Output no other text and no other brackets.

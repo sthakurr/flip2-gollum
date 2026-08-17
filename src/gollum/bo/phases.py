@@ -10,11 +10,13 @@ import wandb
 from tqdm import tqdm
 
 from gollum.bo.config import CHECKPOINT_DIR
+from gollum.featurization.mutation import _consensus
 from gollum.metrics import (
     calculate_data_stats,
     log_bo_metrics,
     log_surrogate_eval,
 )
+from gollum.reasoning.agent import select_acquisitions_with_llm
 
 
 def _run_out_dir():
@@ -70,6 +72,23 @@ def log_acquired(dm, original_indices, iteration):
                         row[dm.input_column], row[dm.target_column]])
 
 
+def log_llm_reasoning(reasoning, iteration):
+    """Print and append the LLM's reasoning trace for `iteration`'s re-ranking
+    call to CHECKPOINT_DIR/<run>/llm_reasoning.csv. No-op if empty
+    (provider/model exposed none)."""
+    if not reasoning:
+        return
+    print(f"[iter {iteration}] LLM reasoning: {reasoning}", flush=True)
+    import csv
+    path = os.path.join(_run_out_dir(), "llm_reasoning.csv")
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as fh:
+        w = csv.writer(fh)
+        if write_header:
+            w.writerow(["iter", "reasoning"])
+        w.writerow([iteration, reasoning])
+
+
 def run_test_eval(config, dm, bo):
     """How well does the Phase-1 model rank the held-aside test split?
 
@@ -103,10 +122,108 @@ def run_test_eval(config, dm, bo):
     return metrics
 
 
+def _predict_gp_stats(surrogate_model, x, chunk_size=32):
+    """Predicted fitness (mean, std) for each row of `x`, processed in chunks.
+
+    For static (precomputed-embedding) surrogates this is a cheap lookup, but
+    for a fine-tuned (LoRA) surrogate each call is a real forward pass through
+    the featurizer -- scoring the whole pool in one batch can OOM alongside the
+    fine-tuning itself, so this chunks the pool instead.
+    """
+    means, stds = [], []
+    for start in range(0, x.shape[0], chunk_size):
+        mean, variance = surrogate_model.predict(x[start : start + chunk_size])
+        means.append(mean.reshape(-1))
+        stds.append(variance.reshape(-1).clamp_min(0).sqrt())
+    return torch.cat(means).tolist(), torch.cat(stds).tolist()
+
+
+def _rerank_with_llm(dm, bo, design_space, pool_positions, acq_scores, wild_type,
+                      reasoning_config, batch_size, iteration):
+    """Re-rank the acquisition function's candidate pool with an LLM, log its
+    reasoning trace, and return the chosen positions into the design space (a
+    `batch_size` subset of `pool_positions`, LLM-ranked).
+
+    Candidate/history dicts are built fresh from `dm`'s current state each
+    call, so the LLM always sees the live acquisition history. If
+    `reasoning_config["include_gp_stats"]` is set, each candidate also carries
+    the just-fit surrogate's predicted fitness (mean +/- std) so prompts that
+    reference it (e.g. prompts/p1.txt) have real numbers to reason over.
+    """
+    pool_positions_list = pool_positions.tolist()
+    original_indices = dm.heldout_indices[pool_positions_list]
+
+    gp_mean = gp_std = None
+    if reasoning_config.get("include_gp_stats"):
+        pool_x = design_space[pool_positions.to(design_space.device)]
+        chunk_size = reasoning_config.get("gp_stats_chunk_size", 32)
+        gp_mean, gp_std = _predict_gp_stats(bo.surrogate_model, pool_x, chunk_size)
+
+    candidates = []
+    for j, (pos, orig_idx) in enumerate(zip(pool_positions_list, original_indices)):
+        row = dm.data.loc[int(orig_idx)]
+        candidate = {"sequence": row[dm.input_column], "_position": pos}
+        if acq_scores is not None:
+            candidate["acquisition_value"] = float(acq_scores[pos])
+        if gp_mean is not None:
+            candidate["gp_mean"] = gp_mean[j]
+            candidate["gp_std"] = gp_std[j]
+        candidates.append(candidate)
+
+    history = [
+        {"sequence": row[dm.input_column], "fitness": float(row[dm.target_column])}
+        for _, row in dm.data.loc[dm.train_indexes].iterrows()
+    ]
+
+    prompt_path = reasoning_config.get("prompt_path")
+    extra_args = {"prompt_path": prompt_path} if prompt_path else {}
+    chosen, llm_reasoning = select_acquisitions_with_llm(
+        candidates, history, wild_type, reasoning_config["llm_config"], batch_size,
+        ensemble_size=reasoning_config.get("ensemble_size", 1),
+        **extra_args,
+    )
+    log_llm_reasoning(llm_reasoning, iteration)
+    return torch.tensor([c["_position"] for c in chosen], dtype=torch.long)
+
+
+def _log_recovery_at_10(dm, pool_positions, before_positions, after_positions, iteration):
+    """Debug-print recovery@10: of the true top-10 (by ground-truth fitness)
+    within the `pool_positions` candidate pool, how many land in the pre-rerank
+    (raw acquisition top-batch_size) vs post-rerank (LLM top-batch_size)
+    selection. Ground-truth fitness is read here only for this printout -- it
+    never reaches the surrogate, acquisition function, or LLM prompt.
+    """
+    orig = dm.heldout_indices[pool_positions.tolist()]
+    fitness = dm.data.loc[orig][dm.target_column].to_numpy()
+    k = min(10, len(orig))
+    true_top10 = set(orig[np.argsort(fitness)[-k:]].tolist())
+
+    before_orig = set(dm.heldout_indices[before_positions.tolist()].tolist())
+    after_orig = set(dm.heldout_indices[after_positions.tolist()].tolist())
+
+    print(
+        f"[iter {iteration}] recovery@10 (true top-{k} within pool of {len(orig)}): "
+        f"before-rerank={len(true_top10 & before_orig)}/{k}, "
+        f"after-rerank={len(true_top10 & after_orig)}/{k}"
+    )
+
+
 def run_bo(config, dm, bo, data_stats, n_iters=None):
     """Phase-1 BO loop: iteratively acquire candidates from the held-out design
     space (the remaining train pool)."""
     n_iters = n_iters if n_iters is not None else config["n_iters"]
+
+    # Optional LLM re-ranking: the acquisition function proposes a
+    # `pool_size`-large shortlist, an LLM re-ranks it using the wild-type
+    # sequence + acquisition history as context, and the top `batch_size` of
+    # that ranking becomes the actual acquired batch. Off by default.
+    reasoning = config.get("reasoning")
+    wild_type = _consensus(dm.data[dm.input_column].tolist()) if reasoning else None
+    if reasoning is not None and reasoning["pool_size"] < bo.batch_size:
+        raise ValueError(
+            f"reasoning.pool_size ({reasoning['pool_size']}) must be >= "
+            f"batch_size ({bo.batch_size})."
+        )
 
     full_train_x = torch.cat([dm.train_x, dm.heldout_x], dim=0)
     full_train_y = torch.cat([dm.train_y, dm.heldout_y], dim=0)
@@ -146,7 +263,13 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
         design_space = dm.heldout_x.clone().to("cuda")
 
         ## this trains the model, updates acqf and returns the next point to evaluate
-        x_next = bo.suggest_next_experiments(train_x, train_y, design_space)
+        if reasoning is not None:
+            batch_size = bo.batch_size
+            bo.batch_size = reasoning["pool_size"]
+            x_next = bo.suggest_next_experiments(train_x, train_y, design_space)
+            bo.batch_size = batch_size
+        else:
+            x_next = bo.suggest_next_experiments(train_x, train_y, design_space)
         if diag is not None:
             diag.record(bo.surrogate_model, i)
         log_acq_topk(dm, getattr(bo, "last_acq_scores", None), i)  # comment out to disable
@@ -160,6 +283,15 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
 
         if not torch.all(matches.sum(dim=-1) == 1):
             print("Unable to find a unique match for some x_next in the dataset.")
+
+        if reasoning is not None:
+            pool_positions = indices
+            before_positions = pool_positions[: bo.batch_size]
+            indices = _rerank_with_llm(
+                dm, bo, design_space, pool_positions, getattr(bo, "last_acq_scores", None),
+                wild_type, reasoning, bo.batch_size, i,
+            )
+            _log_recovery_at_10(dm, pool_positions, before_positions, indices, i)
 
         x_next = x_next.squeeze(1)
 

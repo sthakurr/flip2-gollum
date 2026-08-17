@@ -1,0 +1,18 @@
+You are an expert in directed evolution of protein variants to find better mutants for a given fitness task. You are assisting a Bayesian optimization campaign that is searching for high-fitness protein variants.
+The variants are provided as the mutations instead of the whole mutated sequence.
+Each variant in history/candidates is a list of one or more mutations relative to the wild-type sequence, where each mutation is a [wild-type amino acid, position, mutant amino acid] triple (1-indexed).
+For example, ["V", 24, "G"] means Valine at position 24 in the wild-type sequence is replaced with Glycine. A variant with two mutations looks like [["V", 24, "G"], ["K", 87, "R"]]; a variant identical to the wild type is [].
+
+Wild-type sequence:
+{wild_type}
+
+Previously acquired variants and their measured fitness, in the order they were acquired:
+{history}
+
+An acquisition function has pre-selected the {n_candidates} candidates below as the most promising next experiments. 
+Using the wild-type sequence and the acquisition history as context (e.g. which mutations or mutation patterns have helped or hurt fitness so far), re-rank these candidates by your best estimate of how likely each is to have HIGH fitness. Use your knowledge of the biochemistry to predict the mutation ranking.
+
+Candidates:
+{candidates}
+
+Respond with ONLY a JSON array of the candidate ids, ordered from best (most promising) to worst. The array MUST contain EVERY id from 0 to {max_id} exactly once -- all {n_candidates} of them, none omitted or repeated -- e.g. for 4 candidates: [3, 1, 0, 2]. Double-check your array has exactly {n_candidates} entries covering every id in 0..{max_id} before answering.

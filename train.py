@@ -74,6 +74,11 @@ def main():
     # parser.add_argument("--group", type=str, help="Wandb group runs")
     parser.add_argument("--name", type=str, default=None, help="Wandb run name base")
     parser.add_argument("--wandb_project", type=str, default=None, help="Wandb project name (default gollum-flip2-final)")
+    parser.add_argument(
+        "--reasoning", type=dict, default=None,
+        help="Optional LLM re-ranking of the acquisition shortlist before each "
+             "acquired batch: {pool_size: int, llm_config: {class_path, init_args}}",
+    )
     parser.add_argument("--save_model", type=bool, default=False, help="Save the finetuned model after training")
     parser.add_argument("--save_epoch_models", type=bool, default=False, help="DeepGP: save the finetuning model at every fit epoch")
     parser.add_argument("--visualize_latent", type=bool, default=False, help="DeepGP: plot latent-space (UMAP) evolution across fit epochs")

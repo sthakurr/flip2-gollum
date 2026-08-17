@@ -12,6 +12,8 @@ pandas
 tqdm
 rdkit
 openai
+anthropic
+google-genai
 peft
 drfp
 rxnfp
