@@ -57,8 +57,9 @@ surrogate_model:
     initial_lengthscale_val: 1.0
 reasoning:
   pool_size: 200                    # acquisition-function shortlist size handed to the LLM
-  prompt_path: src/gollum/reasoning/prompts/p3.txt
-  ensemble_size: 3                  # independent rerank calls per iteration, combined via Borda count
+  prompt_path: src/gollum/reasoning/prompts/p6.txt
+  include_structure: true           # one-time ESM3 fold of the wild-type, injected per mutated position
+  include_gp_stats: true            # p6 needs mean/std to compute its explicit UCB ranking rule
   llm_config:
     class_path: gollum.reasoning.llm.GeminiLLM
     init_args:

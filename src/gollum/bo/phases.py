@@ -17,6 +17,7 @@ from gollum.metrics import (
     log_surrogate_eval,
 )
 from gollum.reasoning.agent import select_acquisitions_with_llm
+from gollum.reasoning.structure import fold_wild_type
 
 
 def _run_out_dir():
@@ -73,20 +74,12 @@ def log_acquired(dm, original_indices, iteration):
 
 
 def log_llm_reasoning(reasoning, iteration):
-    """Print and append the LLM's reasoning trace for `iteration`'s re-ranking
-    call to CHECKPOINT_DIR/<run>/llm_reasoning.csv. No-op if empty
+    """Print the LLM's reasoning trace for `iteration`'s re-ranking call to
+    stdout (captured in the run's wandb console log). No-op if empty
     (provider/model exposed none)."""
     if not reasoning:
         return
     print(f"[iter {iteration}] LLM reasoning: {reasoning}", flush=True)
-    import csv
-    path = os.path.join(_run_out_dir(), "llm_reasoning.csv")
-    write_header = not os.path.exists(path)
-    with open(path, "a", newline="") as fh:
-        w = csv.writer(fh)
-        if write_header:
-            w.writerow(["iter", "reasoning"])
-        w.writerow([iteration, reasoning])
 
 
 def run_test_eval(config, dm, bo):
@@ -139,7 +132,7 @@ def _predict_gp_stats(surrogate_model, x, chunk_size=32):
 
 
 def _rerank_with_llm(dm, bo, design_space, pool_positions, acq_scores, wild_type,
-                      reasoning_config, batch_size, iteration):
+                      reasoning_config, batch_size, iteration, structure=None):
     """Re-rank the acquisition function's candidate pool with an LLM, log its
     reasoning trace, and return the chosen positions into the design space (a
     `batch_size` subset of `pool_positions`, LLM-ranked).
@@ -149,6 +142,8 @@ def _rerank_with_llm(dm, bo, design_space, pool_positions, acq_scores, wild_type
     `reasoning_config["include_gp_stats"]` is set, each candidate also carries
     the just-fit surrogate's predicted fitness (mean +/- std) so prompts that
     reference it (e.g. prompts/p1.txt) have real numbers to reason over.
+    `structure` (from gollum.reasoning.structure.fold_wild_type, computed once
+    per run) is forwarded as-is for prompts that reference it (e.g. p4.txt).
     """
     pool_positions_list = pool_positions.tolist()
     original_indices = dm.heldout_indices[pool_positions_list]
@@ -180,6 +175,7 @@ def _rerank_with_llm(dm, bo, design_space, pool_positions, acq_scores, wild_type
     chosen, llm_reasoning = select_acquisitions_with_llm(
         candidates, history, wild_type, reasoning_config["llm_config"], batch_size,
         ensemble_size=reasoning_config.get("ensemble_size", 1),
+        structure=structure,
         **extra_args,
     )
     log_llm_reasoning(llm_reasoning, iteration)
@@ -187,24 +183,37 @@ def _rerank_with_llm(dm, bo, design_space, pool_positions, acq_scores, wild_type
 
 
 def _log_recovery_at_10(dm, pool_positions, before_positions, after_positions, iteration):
-    """Debug-print recovery@10: of the true top-10 (by ground-truth fitness)
-    within the `pool_positions` candidate pool, how many land in the pre-rerank
-    (raw acquisition top-batch_size) vs post-rerank (LLM top-batch_size)
-    selection. Ground-truth fitness is read here only for this printout -- it
-    never reaches the surrogate, acquisition function, or LLM prompt.
+    """Debug-print recovery@10 and the mean-fitness delta between the pre- and
+    post-rerank picks: of the true top-10 (by ground-truth fitness) within the
+    `pool_positions` candidate pool, how many land in the pre-rerank (raw
+    acquisition top-batch_size) vs post-rerank (LLM top-batch_size) selection,
+    and whether the LLM's actual picks have higher or lower true fitness, on
+    average, than the acquisition-only picks it replaced. recovery@10 alone
+    can't tell the two apart: a rerank can leave recovery@10 unchanged while
+    still systematically drifting the picks' fitness up or down (e.g. toward
+    pure exploitation), which is what the fitness delta is for. Ground-truth
+    fitness is read here only for this printout -- it never reaches the
+    surrogate, acquisition function, or LLM prompt.
     """
     orig = dm.heldout_indices[pool_positions.tolist()]
     fitness = dm.data.loc[orig][dm.target_column].to_numpy()
     k = min(10, len(orig))
     true_top10 = set(orig[np.argsort(fitness)[-k:]].tolist())
 
-    before_orig = set(dm.heldout_indices[before_positions.tolist()].tolist())
-    after_orig = set(dm.heldout_indices[after_positions.tolist()].tolist())
+    before_orig = dm.heldout_indices[before_positions.tolist()]
+    after_orig = dm.heldout_indices[after_positions.tolist()]
+
+    before_fitness = dm.data.loc[before_orig][dm.target_column].to_numpy()
+    after_fitness = dm.data.loc[after_orig][dm.target_column].to_numpy()
+    fitness_delta = after_fitness.mean() - before_fitness.mean()
 
     print(
         f"[iter {iteration}] recovery@10 (true top-{k} within pool of {len(orig)}): "
-        f"before-rerank={len(true_top10 & before_orig)}/{k}, "
-        f"after-rerank={len(true_top10 & after_orig)}/{k}"
+        f"before-rerank={len(true_top10 & set(before_orig.tolist()))}/{k}, "
+        f"after-rerank={len(true_top10 & set(after_orig.tolist()))}/{k} | "
+        f"mean fitness before-rerank={before_fitness.mean():.4f}, "
+        f"after-rerank={after_fitness.mean():.4f} (delta={fitness_delta:+.4f})",
+        flush=True,
     )
 
 
@@ -224,6 +233,10 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
             f"reasoning.pool_size ({reasoning['pool_size']}) must be >= "
             f"batch_size ({bo.batch_size})."
         )
+    # One-time ESM3 fold of the wild-type: a handful of point mutations don't
+    # change the fold, so its structural context is reused for every candidate
+    # across the whole run instead of re-folding per candidate/iteration.
+    structure = fold_wild_type(wild_type) if reasoning and reasoning.get("include_structure") else None
 
     full_train_x = torch.cat([dm.train_x, dm.heldout_x], dim=0)
     full_train_y = torch.cat([dm.train_y, dm.heldout_y], dim=0)
@@ -262,8 +275,14 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
         train_y = dm.train_y.clone().to("cuda")
         design_space = dm.heldout_x.clone().to("cuda")
 
+        # `reasoning.start_iter` (default 0) lets reasoning phase in after the
+        # GP has had a few iterations to calibrate, instead of re-ranking from
+        # a near-uninformed posterior; iterations before it behave exactly as
+        # if `reasoning` were unset.
+        reasoning_active = reasoning is not None and i >= reasoning.get("start_iter", 0)
+
         ## this trains the model, updates acqf and returns the next point to evaluate
-        if reasoning is not None:
+        if reasoning_active:
             batch_size = bo.batch_size
             bo.batch_size = reasoning["pool_size"]
             x_next = bo.suggest_next_experiments(train_x, train_y, design_space)
@@ -284,12 +303,12 @@ def run_bo(config, dm, bo, data_stats, n_iters=None):
         if not torch.all(matches.sum(dim=-1) == 1):
             print("Unable to find a unique match for some x_next in the dataset.")
 
-        if reasoning is not None:
+        if reasoning_active:
             pool_positions = indices
             before_positions = pool_positions[: bo.batch_size]
             indices = _rerank_with_llm(
                 dm, bo, design_space, pool_positions, getattr(bo, "last_acq_scores", None),
-                wild_type, reasoning, bo.batch_size, i,
+                wild_type, reasoning, bo.batch_size, i, structure,
             )
             _log_recovery_at_10(dm, pool_positions, before_positions, indices, i)
 

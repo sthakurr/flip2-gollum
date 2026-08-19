@@ -18,31 +18,46 @@ from gollum.utils.config import instantiate_class
 PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "p0.txt")
 
 
-def _mutations(sequence: str, wild_type: str) -> List[List[Any]]:
+def _mutations(sequence: str, wild_type: str, structure: Dict[str, Any] = None) -> List[List[Any]]:
     """`sequence`'s mutations relative to `wild_type`, as [wt_aa, position,
     mut_aa] triples (1-indexed). Full sequences are mostly identical within a
     mutant library and burn far more tokens than the handful of substitutions
-    that actually vary, so the LLM sees only the mutation list."""
-    return [
-        [wt_aa, i + 1, mut_aa]
-        for i, (wt_aa, mut_aa) in enumerate(zip(wild_type, sequence))
-        if wt_aa != mut_aa
-    ]
+    that actually vary, so the LLM sees only the mutation list.
+
+    If `structure` (from gollum.reasoning.structure.fold_wild_type) is given,
+    each triple gets a 4th element: the wild-type's real structural context
+    (secondary structure, solvent exposure, prediction confidence) at that
+    position, since a handful of point mutations don't change the fold.
+    """
+    muts = []
+    for i, (wt_aa, mut_aa) in enumerate(zip(wild_type, sequence)):
+        if wt_aa == mut_aa:
+            continue
+        mut = [wt_aa, i + 1, mut_aa]
+        if structure is not None:
+            from gollum.reasoning.structure import annotate_position
+            mut.append(annotate_position(i + 1, structure))
+        muts.append(mut)
+    return muts
 
 
-def _format_history(history: List[Dict[str, Any]], wild_type: str) -> str:
+def _format_history(
+    history: List[Dict[str, Any]], wild_type: str, structure: Dict[str, Any] = None
+) -> str:
     if not history:
         return "(none yet)"
     return "\n".join(
-        f"{i}. {_mutations(point['sequence'], wild_type)} -> fitness: {point['fitness']}"
+        f"{i}. {_mutations(point['sequence'], wild_type, structure)} -> fitness: {point['fitness']}"
         for i, point in enumerate(history)
     )
 
 
-def _format_candidates(candidates: List[Dict[str, Any]], wild_type: str) -> str:
+def _format_candidates(
+    candidates: List[Dict[str, Any]], wild_type: str, structure: Dict[str, Any] = None
+) -> str:
     lines = []
     for i, candidate in enumerate(candidates):
-        line = f"id {i}: {_mutations(candidate['sequence'], wild_type)}"
+        line = f"id {i}: {_mutations(candidate['sequence'], wild_type, structure)}"
         if "gp_mean" in candidate and "gp_std" in candidate:
             line += f" | predicted fitness: {candidate['gp_mean']:.4f} +/- {candidate['gp_std']:.4f}"
         lines.append(line)
@@ -54,13 +69,14 @@ def format_ranking_prompt(
     history: List[Dict[str, Any]],
     wild_type: str,
     prompt_path: str = PROMPT_PATH,
+    structure: Dict[str, Any] = None,
 ) -> str:
     with open(prompt_path) as f:
         template = f.read()
     return template.format(
         wild_type=wild_type,
-        history=_format_history(history, wild_type),
-        candidates=_format_candidates(candidates, wild_type),
+        history=_format_history(history, wild_type, structure),
+        candidates=_format_candidates(candidates, wild_type, structure),
         n_candidates=len(candidates),
         max_id=len(candidates) - 1,
     )
@@ -108,6 +124,7 @@ def select_acquisitions_with_llm(
     batch_size: int,
     prompt_path: str = PROMPT_PATH,
     ensemble_size: int = 3,
+    structure: Dict[str, Any] = None,
 ) -> tuple:
     """Re-rank `candidates` with an LLM and return (chosen, reasoning): the top
     `batch_size` candidates by the LLM's ranking, and its native reasoning
@@ -128,8 +145,11 @@ def select_acquisitions_with_llm(
         vote rather than failing the whole re-rank; only raises if every
         member fails. 1 (default) is a single call, no aggregation. Costs
         `ensemble_size` LLM calls per invocation.
+    structure: optional wild-type structural annotation from
+        gollum.reasoning.structure.fold_wild_type, attached to each mutation
+        in the prompt (see prompts/p4.txt).
     """
-    prompt = format_ranking_prompt(candidates, history, wild_type, prompt_path)
+    prompt = format_ranking_prompt(candidates, history, wild_type, prompt_path, structure)
     llm = instantiate_class(llm_config)
     n_candidates = len(candidates)
 

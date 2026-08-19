@@ -1,0 +1,23 @@
+You are re-ranking a Bayesian optimization (BO) system's shortlist of protein variants for a directed evolution campaign. This shortlist was already selected by an acquisition function that explicitly trades off predicted fitness against uncertainty (an upper confidence bound: predicted mean + 1.0 * predicted std) -- it is a deliberately exploratory set, not just "the candidates that look best". Your job is to refine that tradeoff with real biochemical and structural evidence, not to discard it and re-rank by which mutation you personally believe is most promising. A ranking that ignores uncertainty and just picks what looks best is measurably worse for this campaign: it makes the acquired batch more exploitative than intended, which hurts how many of the true best variants get discovered over the full campaign, not just this round.
+
+The variants are provided as the mutations instead of the whole mutated sequence.
+Each variant in history/candidates is a list of one or more mutations relative to the wild-type sequence, where each mutation is a [wild-type amino acid, position, mutant amino acid, structural context] tuple (1-indexed). The structural context is a REAL prediction (from ESM3, folded once on the wild type), not a guess: secondary structure (helix/strand/turn/bend/coil), solvent exposure (buried/intermediate exposure/exposed, relative to this protein's own residues), and the fold's confidence at that position (pLDDT, 0-100%, where lower means the local structure there is unreliable or likely flexible/disordered).
+For example, ["V", 24, "G", "helix, buried, pLDDT 92%"] means Valine at position 24 -- a buried helix position the model is confident about -- is replaced with Glycine. A variant with two mutations looks like [["V", 24, "G", "..."], ["K", 87, "R", "..."]]; a variant identical to the wild type is [].
+
+Wild-type sequence:
+{wild_type}
+
+Previously acquired variants and their measured fitness, in the order they were acquired:
+{history}
+
+A Gaussian process fit to this data has scored the {n_candidates} candidates below and pre-selected them as the most promising next experiments. Each is shown with the GP's predicted fitness as mean +/- standard deviation.
+
+Candidates:
+{candidates}
+
+Ranking procedure:
+1. Primary criterion: for each candidate, compute UCB = mean + 1.0 * std, and rank primarily by this score -- reproducing the acquisition function's own fitness/uncertainty tradeoff. Do NOT rank primarily by mean alone, and do NOT rank primarily by which mutation looks most biochemically promising to you.
+2. Secondary adjustment: only reorder candidates whose UCB scores are close to each other (within roughly one standard deviation), using real biochemical/structural evidence -- e.g. a non-conservative substitution (large change in size, charge, or polarity) at a buried, high-confidence position is a bigger risk to stability than the same substitution at an exposed or low-confidence position. Use only the structural context actually given; don't infer or assert anything about active sites, catalytic residues, or conservation beyond what's provided.
+3. Do not use biochemical reasoning to reorder candidates whose UCB scores differ by a wide margin -- a large UCB gap should dominate your ranking regardless of how promising a lower-UCB candidate looks to you.
+
+Respond with ONLY a JSON array of the candidate ids, ordered from best (most promising) to worst. The array MUST contain EVERY id from 0 to {max_id} exactly once -- all {n_candidates} of them, none omitted or repeated -- e.g. for 4 candidates: [3, 1, 0, 2]. Double-check your array has exactly {n_candidates} entries covering every id in 0..{max_id} before answering.

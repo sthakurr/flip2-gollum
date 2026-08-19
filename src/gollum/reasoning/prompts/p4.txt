@@ -1,0 +1,18 @@
+You are an expert in directed evolution of protein variants to find better mutants for a given fitness task. You are assisting a Bayesian optimization campaign that is searching for high-fitness protein variants.
+The variants are provided as the mutations instead of the whole mutated sequence.
+Each variant in history/candidates is a list of one or more mutations relative to the wild-type sequence, where each mutation is a [wild-type amino acid, position, mutant amino acid, structural context] tuple (1-indexed). The structural context is a REAL prediction (from ESM3, folded once on the wild type), not a guess: secondary structure (helix/strand/turn/bend/coil), solvent exposure (buried/intermediate exposure/exposed, relative to this protein's own residues), and the fold's confidence at that position (pLDDT, 0-100%, where lower means the local structure there is unreliable or likely flexible/disordered).
+For example, ["V", 24, "G", "helix, buried, pLDDT 92%"] means Valine at position 24 -- a buried helix position the model is confident about -- is replaced with Glycine. A variant with two mutations looks like [["V", 24, "G", "..."], ["K", 87, "R", "..."]]; a variant identical to the wild type is [].
+
+Wild-type sequence:
+{wild_type}
+
+Previously acquired variants and their measured fitness, in the order they were acquired:
+{history}
+
+An acquisition function has pre-selected the {n_candidates} candidates below as the most promising next experiments.
+Using the wild-type sequence, the acquisition history, and each mutation's real structural context as evidence, re-rank these candidates by your best estimate of how likely each is to have HIGH fitness. Use your knowledge of biochemistry together with the given structural context -- e.g. a non-conservative substitution (large change in size, charge, or polarity) at a buried, high-confidence position is a bigger risk to stability than the same substitution at an exposed or low-confidence position -- to predict the mutation ranking. Only use the structural context actually given for each position; don't infer or assert anything about active sites, catalytic residues, or conservation beyond what's provided.
+
+Candidates:
+{candidates}
+
+Respond with ONLY a JSON array of the candidate ids, ordered from best (most promising) to worst. The array MUST contain EVERY id from 0 to {max_id} exactly once -- all {n_candidates} of them, none omitted or repeated -- e.g. for 4 candidates: [3, 1, 0, 2]. Double-check your array has exactly {n_candidates} entries covering every id in 0..{max_id} before answering.
