@@ -100,6 +100,21 @@ def validate_configuration(config):
         if not is_llm_featurizer and representation == "get_tokens":
             raise ValueError("DeepGP with ProjectionLayer requires pre-computed embeddings, not 'get_tokens'.")
 
+    # The stuyver kernel's dimension-scaled priors assume inputs in [0, 1]^d
+    if config["surrogate_model"].get("init_args", {}).get("kernel") == "stuyver":
+        if surrogate_class != "gollum.surrogate_models.gp.GP":
+            raise ValueError("kernel='stuyver' is only implemented for the static GP.")
+        if config["data"]["init_args"]["normalize_input"] != "per_dim_normalisation":
+            raise ValueError(
+                "kernel='stuyver' requires normalize_input='per_dim_normalisation' "
+                "(its priors are calibrated for per-dimension [0, 1] features)."
+            )
+        if config["data"]["init_args"].get("reduce_dim"):
+            raise ValueError(
+                "kernel='stuyver' with reduce_dim: PCA runs after normalization, so "
+                "the features reaching the kernel are not in [0, 1]."
+            )
+
     # Ensure model embedding sizes are correct
     model_name = featurizer_config.get("model_name")
     if model_name in MODEL_EMBEDDING_SIZES:
@@ -137,6 +152,9 @@ def apply_cli_overrides(config):
 
     if config.get("data_path", None) is not None:
         config["data"]["init_args"]["data_path"] = config["data_path"]
+
+    if config.get("kernel", None) is not None:
+        config["surrogate_model"]["init_args"]["kernel"] = config["kernel"]
 
     if config.get("lora_r", None) is not None:
         config["surrogate_model"]["init_args"]["finetuning_model"]["init_args"]["lora_r"] = config["lora_r"]
@@ -177,6 +195,8 @@ def make_run_name(config, mode):
         reduce_dim = config["data"]["init_args"].get("reduce_dim")
         if reduce_dim:
             base += f"_pca{reduce_dim}"
+    if config["surrogate_model"].get("init_args", {}).get("kernel") == "stuyver":
+        base += "_stuyver"
     acq = config.get("acq")
     beta = config.get("beta")
     if acq == "ucb" or (acq is None and beta is not None):

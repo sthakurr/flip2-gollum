@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 from gpytorch.means.mean import Mean
 from gpytorch.module import Module
 from gpytorch.kernels import MaternKernel, ScaleKernel
+from gpytorch.priors import GammaPrior
 
 from typing import Union
 import numpy as np
@@ -44,6 +45,23 @@ class SurrogateModel(ABC):
 
 
 
+def stuyver_kernel(d: int, nu: float = 2.5):
+    """Dimension-aware Matern kernel (Stuyver et al.): with inputs normalized
+    per-dimension to [0, 1], the lengthscale prior scale grows with the input
+    dimension. l0 = o0 = 0.4*sqrt(d) + 4, l ~ Gamma(2*l0, 2) (mean l0),
+    o ~ Gamma(o0, 1) (mean o0). One shared lengthscale (no ARD), so the single
+    hyperprior applies to all dimensions.
+    """
+    scale = 0.4 * (d ** 0.5) + 4.0
+    base = MaternKernel(nu=nu, lengthscale_prior=GammaPrior(2.0 * scale, 2.0))
+    base.lengthscale = scale
+    kernel = ScaleKernel(base, outputscale_prior=GammaPrior(scale, 1.0))
+    kernel.outputscale = scale
+    print(f"[stuyver] d={d} lengthscale/outputscale init={scale:.3f} "
+          f"priors: l~Gamma({2 * scale:.3f}, 2.0), o~Gamma({scale:.3f}, 1.0)")
+    return kernel
+
+
 class GP(SurrogateModel, SingleTaskGP):
     def __init__(
         self,
@@ -59,7 +77,17 @@ class GP(SurrogateModel, SingleTaskGP):
         initial_outputscale_val: float = 1.0,
         initial_lengthscale_val: float = 1.0,
         gp_lr: float = 0.2,
+        kernel: str = "default",
     ) -> None:
+
+        if kernel not in ("default", "stuyver"):
+            raise ValueError(f"Unknown kernel '{kernel}', expected 'default' or 'stuyver'")
+        if kernel == "stuyver":
+            # Built here (not from the config) because the priors need d, and the
+            # initial values are the prior means, not initial_*_val.
+            covar_module = stuyver_kernel(train_x.shape[-1])
+            initial_lengthscale_val = None
+            initial_outputscale_val = None
 
         super().__init__(
             train_X=train_x,
@@ -79,9 +107,9 @@ class GP(SurrogateModel, SingleTaskGP):
         )
 
         hypers = {
-            "likelihood.noise_covar.noise": torch.tensor(initial_noise_val),
-            "covar_module.base_kernel.lengthscale": torch.tensor(initial_lengthscale_val),
-            "covar_module.outputscale": torch.tensor(initial_outputscale_val),
+            "likelihood.noise_covar.noise": initial_noise_val,
+            "covar_module.base_kernel.lengthscale": initial_lengthscale_val,
+            "covar_module.outputscale": initial_outputscale_val,
         }
 
         existing_parameters = {name for name, _ in self.named_parameters()}

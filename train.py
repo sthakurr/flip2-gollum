@@ -69,6 +69,7 @@ def main():
     )
     parser.add_argument("--acq", type=str, help="Acquisition override: logei | ucb | greedy")
     parser.add_argument("--beta", type=float, help="UCB beta override (acquisition.init_args.beta)")
+    parser.add_argument("--kernel", type=str, help="Kernel override (static GP): default | stuyver")
     parser.add_argument("--lora_r", type=int, help="LoRA rank override for the finetuning featurizer")
     parser.add_argument("--lora_dropout", type=float, help="LoRA dropout override for the finetuning featurizer")
     # parser.add_argument("--group", type=str, help="Wandb group runs")
