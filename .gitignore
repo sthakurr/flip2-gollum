@@ -906,7 +906,8 @@ FodyWeavers.xsd
 
 scratch/
 
-tests/
+tests/*
+!tests/test_mutation_context_topk_pool.py
 
 embeddings_cache/
 
@@ -925,4 +926,3 @@ caches/
 
 results/
 scripts/
-

@@ -30,6 +30,78 @@ def token_mutation_pool(hidden, input_ids, consensus_ids, attn_mask):
         pooled[nomut] = (hidden[nomut] * am).sum(dim=1) / am.sum(dim=1).clamp_min(1.0)
     return pooled
 
+
+def token_mutation_context_topk_pool(
+    hidden,
+    input_ids,
+    consensus_ids,
+    attn_mask,
+    top_k=4,
+    locality=0.5,
+    temperature=1.0,
+):
+    """Differentiable mutation-conditioned sparse context pooling.
+
+    Each mutation token is used as a query over the other valid tokens. Context
+    tokens are ranked by cosine similarity minus a logarithmic sequence-distance
+    penalty; the mutation token and the ``top_k`` highest-ranked context tokens
+    are then softmax-pooled. Per-mutation context vectors are averaged, yielding
+    the same ``(batch, hidden_dim)`` output as :func:`token_mutation_pool`.
+
+    ``top_k=0`` exactly reduces to mutation-only pooling. Hard top-k controls
+    membership while gradients still flow through the selected hidden states and
+    their softmax scores into a trainable encoder or its LoRA adapters.
+    """
+    if top_k < 0:
+        raise ValueError(f"top_k must be non-negative, got {top_k}.")
+    if locality < 0:
+        raise ValueError(f"locality must be non-negative, got {locality}.")
+    if temperature <= 0:
+        raise ValueError(f"temperature must be positive, got {temperature}.")
+
+    mutation_mask = (input_ids != consensus_ids.unsqueeze(0)) & attn_mask.bool()
+    normalized = F.normalize(hidden.float(), p=2, dim=-1)
+    out = []
+
+    for batch_idx in range(hidden.shape[0]):
+        mutation_indices = mutation_mask[batch_idx].nonzero(as_tuple=True)[0]
+        valid_indices = attn_mask[batch_idx].bool().nonzero(as_tuple=True)[0]
+        mutation_contexts = []
+
+        for mutation_idx_tensor in mutation_indices:
+            mutation_idx = int(mutation_idx_tensor.item())
+            other_indices = valid_indices[valid_indices != mutation_idx]
+            selected_indices = mutation_idx_tensor.view(1)
+            selected_scores = hidden.new_tensor([1.0])
+
+            if top_k and other_indices.numel():
+                query = normalized[batch_idx, mutation_idx]
+                similarities = normalized[batch_idx, other_indices] @ query
+                distances = (other_indices - mutation_idx).abs().to(similarities.dtype)
+                scores = similarities - locality * torch.log1p(distances)
+                k = min(top_k, scores.numel())
+                top = scores.topk(k)
+                selected_indices = torch.cat([selected_indices, other_indices[top.indices]])
+                selected_scores = torch.cat(
+                    [selected_scores, top.values.to(selected_scores.dtype)]
+                )
+
+            weights = torch.softmax(selected_scores / temperature, dim=0).to(hidden.dtype)
+            context = (
+                hidden[batch_idx, selected_indices] * weights.unsqueeze(-1)
+            ).sum(dim=0)
+            mutation_contexts.append(context)
+
+        if mutation_contexts:
+            out.append(torch.stack(mutation_contexts).mean(dim=0))
+        else:
+            mask = attn_mask[batch_idx].unsqueeze(-1).to(hidden.dtype)
+            out.append(
+                (hidden[batch_idx] * mask).sum(dim=0) / mask.sum(dim=0).clamp_min(1.0)
+            )
+
+    return torch.stack(out)
+
 class BaseNNFeaturizer(nn.Module):
     """
     Base class for neural network-based featurizers.
@@ -105,6 +177,9 @@ class LLMFeaturizer(BaseNNFeaturizer):
         target_ratio: float = 0.25,
         from_top: bool = True,
         gradient_checkpointing: bool = True,
+        mutation_top_k: int = 4,
+        mutation_locality: float = 0.5,
+        mutation_temperature: float = 1.0,
     ):
         super().__init__(input_dim=input_dim, projection_dim=projection_dim)
         print(model_name, "for LLM")
@@ -160,6 +235,9 @@ class LLMFeaturizer(BaseNNFeaturizer):
         self.trainable = trainable
         self.embedding_dim = input_dim
         self.pooling_method = pooling_method
+        self.mutation_top_k = mutation_top_k
+        self.mutation_locality = mutation_locality
+        self.mutation_temperature = mutation_temperature
         # Learned per-position pooling weights, materialised lazily on the first
         # forward (sequence length is only known once we see the tokenised input).
         self.pool_logits = None
@@ -191,7 +269,7 @@ class LLMFeaturizer(BaseNNFeaturizer):
         # Per-position consensus token id over the whole featurized set, for
         # mutation-site pooling (positions differing from it are the mutations).
         consensus_ids = None
-        if self.pooling_method == "mutation":
+        if self.pooling_method in ("mutation", "mutation_context_topk"):
             consensus_ids = x[:, :ids_split].long().mode(dim=0).values
 
         embedding_chunks = []
@@ -231,6 +309,16 @@ class LLMFeaturizer(BaseNNFeaturizer):
             if self.pooling_method == "mutation":
                 pooled = token_mutation_pool(
                     last_hidden_state, input_ids, consensus_ids, attn_mask
+                )
+            elif self.pooling_method == "mutation_context_topk":
+                pooled = token_mutation_context_topk_pool(
+                    last_hidden_state,
+                    input_ids,
+                    consensus_ids,
+                    attn_mask,
+                    top_k=self.mutation_top_k,
+                    locality=self.mutation_locality,
+                    temperature=self.mutation_temperature,
                 )
             elif self.pooling_method == "average":
                 pooled = (esmc_pool(last_hidden_state, attn_mask, "average")

@@ -25,6 +25,9 @@ class Featurizer:
         mc_delta: bool = True,
         mc_structured: bool = True,
         max_length: Optional[int] = None,
+        mutation_top_k: int = 4,
+        mutation_locality: float = 0.5,
+        mutation_temperature: float = 1.0,
     ):
         self.representation = representation
 
@@ -40,6 +43,9 @@ class Featurizer:
             "mc_delta": mc_delta,
             "mc_structured": mc_structured,
             "max_length": max_length,
+            "mutation_top_k": mutation_top_k,
+            "mutation_locality": mutation_locality,
+            "mutation_temperature": mutation_temperature,
         }
         self._featurization_registry = self._build_registry()
         self._output_dim = None
