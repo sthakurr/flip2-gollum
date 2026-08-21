@@ -186,7 +186,19 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         train_mll_additionally: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
         max_fit_iter: int = 100,
+        kernel: str = "default",
     ) -> None:
+
+        if kernel not in ("default", "stuyver"):
+            raise ValueError(f"Unknown kernel '{kernel}', expected 'default' or 'stuyver'")
+        if kernel == "stuyver":
+            # d is the *projected* dimension the kernel sees, not train_x's.
+            proj = getattr(finetuning_model, "projection_dim", None)
+            covar_module = stuyver_kernel(
+                proj if proj is not None else finetuning_model.input_dim
+            )
+            initial_lengthscale_val = None
+            initial_outputscale_val = None
 
         tkwargs = {
             "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
@@ -224,9 +236,9 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         )
 
         hypers = {
-            "likelihood.noise_covar.noise": torch.tensor(initial_noise_val),
-            "covar_module.base_kernel.lengthscale": torch.tensor(initial_lengthscale_val),
-            "covar_module.outputscale": torch.tensor(initial_outputscale_val),
+            "likelihood.noise_covar.noise": initial_noise_val,
+            "covar_module.base_kernel.lengthscale": initial_lengthscale_val,
+            "covar_module.outputscale": initial_outputscale_val,
         }
 
         existing_parameters = {name for name, _ in self.named_parameters()}

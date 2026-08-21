@@ -102,12 +102,12 @@ def validate_configuration(config):
 
     # The stuyver kernel's dimension-scaled priors assume inputs in [0, 1]^d
     if config["surrogate_model"].get("init_args", {}).get("kernel") == "stuyver":
-        if surrogate_class != "gollum.surrogate_models.gp.GP":
-            raise ValueError("kernel='stuyver' is only implemented for the static GP.")
-        if config["data"]["init_args"]["normalize_input"] != "per_dim_normalisation":
-            raise ValueError(
-                "kernel='stuyver' requires normalize_input='per_dim_normalisation' "
-                "(its priors are calibrated for per-dimension [0, 1] features)."
+        if (surrogate_class == "gollum.surrogate_models.gp.GP"
+                and config["data"]["init_args"]["normalize_input"] != "per_dim_normalisation"):
+            print(
+                f"WARNING: kernel='stuyver' with normalize_input="
+                f"'{config['data']['init_args']['normalize_input']}' — its priors are "
+                "calibrated for per-dimension [0, 1] features. Ablation only."
             )
         if config["data"]["init_args"].get("reduce_dim"):
             raise ValueError(
