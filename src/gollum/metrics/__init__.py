@@ -5,6 +5,14 @@ from .model_metrics import (
     log_model_parameters,
     calculate_weighted_metrics,
 )
+from .kernel_diagnostics import (
+    dataset_diagnostics,
+    distance_stats,
+    gp_diagnostics,
+    kernel_stats,
+    lora_norms,
+    singular_values,
+)
 from .ranking import (
     spearman,
     kendall,
@@ -23,6 +31,12 @@ all = [
     "log_model_fit_metrics",
     "log_model_parameters",
     "calculate_weighted_metrics",
+    "dataset_diagnostics",
+    "distance_stats",
+    "gp_diagnostics",
+    "kernel_stats",
+    "lora_norms",
+    "singular_values",
     "spearman",
     "kendall",
     "top_k_recovery",

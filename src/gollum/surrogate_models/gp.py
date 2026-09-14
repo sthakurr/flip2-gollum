@@ -2,6 +2,10 @@
 import sys
 
 from gollum.featurization.deep import BaseNNFeaturizer
+from gollum.metrics.kernel_diagnostics import (
+    dataset_diagnostics,
+    gp_diagnostics as step_diagnostics,
+)
 from botorch import fit_gpytorch_mll
 from botorch.models.gp_regression import SingleTaskGP
 from botorch.models.transforms.input import Normalize
@@ -187,6 +191,9 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
         max_fit_iter: int = 100,
         kernel: str = "default",
+        gp_diagnostics: bool = True,
+        diag_eig_max_points: int = 800,
+        diag_eig_every: int = 10,
     ) -> None:
 
         if kernel not in ("default", "stuyver"):
@@ -260,6 +267,9 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.scale_embeddings = scale_embeddings
         self.train_mll_additionally = train_mll_additionally
         self.max_fit_iter = max_fit_iter
+        self.gp_diagnostics = gp_diagnostics
+        self.diag_eig_max_points = diag_eig_max_points
+        self.diag_eig_every = diag_eig_every
 
         self.to_gpu()
 
@@ -326,18 +336,31 @@ class DeepGP(SurrogateModel, SingleTaskGP):
                 flush=True,
             )
             _dbg["t_prev"] = _now
-            base = getattr(self.covar_module, "base_kernel", self.covar_module)
             log = {
-                # moved out of the fit loop — logged once after the fit completes
-                # (one value per epoch); see end of fit().
-                # "embed/median_pairwise_dist": torch.pdist(self.finetuned.detach()).median().item(),
-                "kernel/lengthscale_mean": base.lengthscale.detach().mean().item(),
+                # Embedding geometry is NOT logged here: it is logged once per BO
+                # round over the whole dataset (see log_round_diagnostics), not
+                # over the acquired points.
                 "fit_step": _dbg["step"],
                 "lr/llm_lr": self.optimizer.param_groups[0]["lr"],
                 "lr/gp_lr": self.optimizer.param_groups[1]["lr"],
             }
-            if hasattr(self.covar_module, "outputscale"):
-                log["kernel/outputscale"] = self.covar_module.outputscale.detach().mean().item()
+            if self.gp_diagnostics:
+                # Full (per-eigenvalue, per-layer) keys on the first and last
+                # step only; the eigendecomposition is skipped above
+                # `eig_max_points` where it stops being cheap.
+                n = self.train_x.shape[0]
+                log.update(step_diagnostics(
+                    self,
+                    self.finetuned,
+                    eig=(n <= self.diag_eig_max_points
+                         or _dbg["step"] % self.diag_eig_every == 0),
+                    full=_dbg["step"] == 1,
+                ))
+            else:
+                base = getattr(self.covar_module, "base_kernel", self.covar_module)
+                log["kernel/lengthscale_mean"] = base.lengthscale.detach().mean().item()
+                if hasattr(self.covar_module, "outputscale"):
+                    log["kernel/outputscale"] = self.covar_module.outputscale.detach().mean().item()
             wandb.log(log)
             return mll_loss, grads
 
