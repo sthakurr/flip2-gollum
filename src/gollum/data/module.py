@@ -112,8 +112,9 @@ class BaseDataModule(ABC):
         self.heldout_indices = self.heldout_indices[sorted_indices]
 
         # Reindex in a single pass instead of copy + copy + concat (3B fix).
+        # Keep original index labels: train.py looks rows up via .loc[original indices].
         ordered_indices = train_df_indices + self.heldout_indices.tolist()
-        self.data = self.data.loc[ordered_indices].reset_index(drop=True)
+        self.data = self.data.loc[ordered_indices]
         
 
     def update_results(self, experiment_results, experiment_indices):

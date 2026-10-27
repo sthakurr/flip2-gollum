@@ -72,7 +72,8 @@ from jsonargparse import (
 )
 from gollum.utils.config import instantiate_class
 from botorch.acquisition import AcquisitionFunction
-from gollum.surrogate_models.gp import SurrogateModel
+from gollum.surrogate_models.gp import SurrogateModel, pdist_hist, tsne_plot, kernel_blocks, kernel_hist, spearman
+from sklearn.manifold import TSNE
 
 
 
@@ -248,11 +249,22 @@ def train(config):
     run_name = f"{model_short}_seed{config['seed']}"
 
     with wandb.init(
-        project=config.get("wandb_project", "gollum"),
+        project=config.get("wandb_project", "gollum_mech"),
         config=wandb_config,
         group=config["group"],
         name=run_name,
     ) as run:
+        # uniform x-axes across the metrics
+        run.define_metric("epoch")
+        run.define_metric("train_step")
+        # pdists/ and ls/ hold both axes, so their keys are explicit (no glob overlap)
+        for key in ["grads/*", "lr/*", "loss/*", "embed/*",
+                    "pdists/mean", "pdists/median", "pdists/hist", "ls/lengthscale", "ls/ratio_train"]:
+            run.define_metric(key, step_metric="train_step")
+        for key in ["top5pct_coverage", "train/*", "top_*", "quantile_*", "evaluated_suggestions",
+                    "distances/*", "embed_all/*", "pdists_all/*", "ls_all/*", "tsne/*", "kernel/*",
+                    "pdists/mean_by_epoch", "pdists/median_by_epoch", "ls/lengthscale_by_epoch", "ls/ratio_train_by_epoch", "ls/ratio_test_by_epoch", "ls/ratio_by_max_pdist"]:
+            run.define_metric(key, step_metric="epoch")
 
         dm = setup_data(config)
         bo = setup_bo_optimizer(config, design_space=dm.heldout_x)
@@ -260,6 +272,7 @@ def train(config):
         data_stats = calculate_data_stats(dm.x, dm.y)
         log_data_stats(data_stats)
 
+        prev_tsne = None
         # Start the training loop
         for i in tqdm(range(config["n_iters"]), colour="blue"):
             train_x = dm.train_x.clone().to("cuda")
@@ -269,6 +282,62 @@ def train(config):
             ## this trains the model, updates acqf and returns the next point to evaluate
             _, candidate_positions = bo.suggest_next_experiments(train_x, train_y, design_space)
             indices = torch.tensor(candidate_positions)
+
+            # whole-set embedding stats with the just-fitted model, once per BO iteration
+            if hasattr(bo.surrogate_model, "embed"):
+                emb = bo.surrogate_model.embed(dm.x)
+                d = torch.pdist(emb)  # full N^2/2 pairs: fine for small sets (BH ~4k rows), subsample for large ones
+                ls = getattr(bo.surrogate_model.covar_module, "base_kernel",
+                             bo.surrogate_model.covar_module).lengthscale.mean().item()
+                d_train = torch.pdist(emb[dm.train_indexes])
+                d_test = torch.pdist(emb[torch.as_tensor(dm.heldout_indices)])  # candidates only, no train pairs mixed in
+                e = emb.to(bo.surrogate_model.train_x)  # kernel params' device/dtype
+                kb = kernel_blocks(getattr(bo.surrogate_model.covar_module, "base_kernel", bo.surrogate_model.covar_module),
+                                   e[dm.train_indexes], e[torch.as_tensor(dm.heldout_indices)])
+                # |dy| in the same pair order as kb (pdist == row-major upper triangle); test uses true yields (diagnostic only)
+                y_tr, y_te = dm.y[dm.train_indexes], dm.y[torch.as_tensor(dm.heldout_indices)]
+                dy = {"train-train": torch.pdist(y_tr), "train-test": (y_tr - y_te.T).abs().flatten(),
+                      "test-test": torch.pdist(y_te)}
+                wandb.log({
+                    # < 0: kernel-similar pairs have similar yields; ~0: kernel is yield-blind
+                    **{f"kernel/{name}_dy_spearman": spearman(v, dy[name]) for name, v in kb.items()},
+                    **{f"kernel/{name}_mean": v.mean().item() for name, v in kb.items()},
+                    **{f"kernel/{name}_var": v.var().item() for name, v in kb.items()},
+                    "kernel/hist": kernel_hist(kb, f"kernel values, iter {i}"),
+                    "epoch": i,
+                })
+                first = bo.surrogate_model._first_log
+                if i == 0 and first:
+                    # campaign start at epoch -1: first step of first fit (pretrained embeddings, initial hypers)
+                    wandb.log({f"{k}_by_epoch": first[k] for k in
+                               ["pdists/mean", "pdists/median", "ls/lengthscale", "ls/ratio_train"]} | {"epoch": -1})
+                wandb.log({
+                    "embed_all/min": emb.min().item(),
+                    "embed_all/max": emb.max().item(),
+                    "pdists_all/mean": d.mean().item(),
+                    "pdists_all/median": d.median().item(),
+                    "pdists_all/hist": pdist_hist(d, f"whole set, iter {i}"),
+                    # final lengthscale vs whole-set spread: is the kernel meaningful where acquisition operates
+                    "ls_all/ratio": ls / d.median().item(),
+                    # >1: even the farthest pair in the whole space stays strongly correlated
+                    "ls/ratio_by_max_pdist": ls / d.max().item(),
+                    # end-of-fit state of the per-step train metrics, one point per BO iteration
+                    "pdists/mean_by_epoch": d_train.mean().item(),
+                    "pdists/median_by_epoch": d_train.median().item(),
+                    "ls/lengthscale_by_epoch": ls,
+                    "ls/ratio_train_by_epoch": ls / d_train.median().item(),
+                    "ls/ratio_test_by_epoch": ls / d_test.median().item(),
+                    "epoch": i,
+                })
+
+                # warm-start from previous map (rescaled to tiny std, as tsne expects) so maps stay comparable across iters
+                init = "pca" if prev_tsne is None else prev_tsne / prev_tsne[:, 0].std() * 1e-4
+                prev_tsne = TSNE(n_components=2, init=init, random_state=config["seed"]).fit_transform(emb.numpy())
+                wandb.log({
+                    "tsne/map": tsne_plot(prev_tsne, dm.y.cpu().numpy(), dm.train_indexes, dm.heldout_indices[indices],
+                                          f"iter {i}"),
+                    "epoch": i,
+                })
 
             log_bo_metrics(data_stats, dm.train_y, epoch=i)
 
@@ -374,7 +443,7 @@ def main():
     parser.add_argument("--n_iters", type=int, help="How many iterations to run")
    
     parser.add_argument("--group", type=str, help="Wandb group runs")
-    parser.add_argument("--wandb_project", type=str, default="gollum", help="Wandb project name")
+    parser.add_argument("--wandb_project", type=str, default="gollum_mech", help="Wandb project name")
     parser.add_argument("--visualize", type=bool, default=False, help="Visualize embeddings after training")
     parser.add_argument("--full_data_path", type=str, default=None, help="Path to full dataset with split labels (for visualization)")
     parser.add_argument("--save_checkpoints", type=bool, default=False, help="Save finetuned model checkpoints for DeepGP runs")

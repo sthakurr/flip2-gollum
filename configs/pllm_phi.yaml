@@ -1,7 +1,7 @@
 data:
   class_path: gollum.data.module.BaseDataModule
   init_args:
-    data_path: data/reactions/buchwald-hartwig/bh_reaction_1_procedure_template_basic.csv
+    data_path: data/buchwald-hartwig/bh_reaction_1.csv
     input_column: procedure
     target_column: objective
     maximize: true
@@ -86,4 +86,4 @@ surrogate_model:
         lora_dropout: 0.2
         trainable: true
 n_iters: 50
-seed: 1
+seed: 4

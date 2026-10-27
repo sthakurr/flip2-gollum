@@ -22,11 +22,103 @@ from typing import Union
 import numpy as np
 import torch
 import gpytorch
+import io
+import itertools
 import os
+import PIL.Image
 
 
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
+# global optimizer-step counter across all DeepGP fits (x-axis for grads/, lr/, loss/ panels)
+_TRAIN_STEP = itertools.count()
+
+
+def _fig_to_image(fig):
+    # render via png buffer: wandb.Image(fig) assumes pyplot was imported
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    buf.seek(0)
+    return wandb.Image(PIL.Image.open(buf))
+
+
+def pdist_hist(d, title):
+    """Histogram of pairwise distances with mean/median marked, as a wandb.Image."""
+    from matplotlib.figure import Figure  # no pyplot: headless-safe, no global figure state
+
+    d = d.cpu().numpy()
+    mean, median = d.mean(), np.median(d)
+    fig = Figure(figsize=(5, 3.5))
+    ax = fig.subplots()
+    ax.hist(d, bins=50, color="0.7")
+    ax.axvline(mean, color="tab:red", label=f"mean {mean:.3g}")
+    ax.axvline(median, color="tab:blue", linestyle="--", label=f"median {median:.3g}")
+    ax.set_xlabel("pairwise L2 distance")
+    ax.set_title(title)
+    ax.legend()
+    return _fig_to_image(fig)
+
+
+@torch.no_grad()
+def kernel_blocks(base_kernel, train_emb, test_emb):
+    """Base-kernel correlations (outputscale excluded, so in [0, 1]) per block; diagonals of square blocks dropped."""
+    def off_diag(k):
+        i, j = torch.triu_indices(*k.shape, offset=1)
+        return k[i, j]
+
+    k = lambda a, b: base_kernel(a, b).to_dense().cpu()
+    return {
+        "train-train": off_diag(k(train_emb, train_emb)),
+        "train-test": k(train_emb, test_emb).flatten(),
+        "test-test": off_diag(k(test_emb, test_emb)),
+    }
+
+
+def spearman(a, b):
+    """Rank correlation of two 1D tensors (ties broken arbitrarily)."""
+    ra, rb = (x.argsort().argsort().double() for x in (a, b))
+    return torch.corrcoef(torch.stack([ra, rb]))[0, 1].item()
+
+
+def kernel_hist(blocks, title):
+    """Overlaid density histograms of kernel values per block, means marked. Returns wandb.Image."""
+    from matplotlib.figure import Figure
+
+    fig = Figure(figsize=(5, 3.5))
+    ax = fig.subplots()
+    # lower edge from data, not 0: in the near-flat regime all mass sits in a few [0, 1] bins
+    bins = np.linspace(min(v.min().item() for v in blocks.values()), 1, 51)
+    for (name, v), c in zip(blocks.items(), ["tab:blue", "tab:orange", "tab:green"]):
+        v = v.numpy()
+        # density: block sizes differ by orders of magnitude
+        ax.hist(v, bins=bins, density=True, histtype="step", color=c, label=f"{name} (mean {v.mean():.3g})")
+        ax.axvline(v.mean(), color=c, linestyle="--")
+    ax.set_xlabel("k(x, x') / outputscale")
+    ax.set_ylabel("density")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    return _fig_to_image(fig)
+
+
+def tsne_plot(z, y, train_idx, new_idx, title):
+    """2D t-SNE map coloured by y; train points and new suggestions marked. Returns wandb.Image."""
+    from matplotlib.figure import Figure
+
+    y = np.asarray(y).ravel()
+    # indices may arrive as torch tensors / lists; a 1-elem tensor would index numpy as a scalar
+    train_idx, new_idx = np.asarray(train_idx).ravel(), np.asarray(new_idx).ravel()
+    fig = Figure(figsize=(6, 5))
+    ax = fig.subplots()
+    sc = ax.scatter(z[:, 0], z[:, 1], c=y, s=4, cmap="viridis", alpha=0.6, linewidths=0)
+    ax.scatter(z[train_idx, 0], z[train_idx, 1], s=18, facecolors="none", edgecolors="k", linewidths=0.6, label="train")
+    ax.scatter(z[new_idx, 0], z[new_idx, 1], s=80, marker="*", c="tab:red", edgecolors="k", linewidths=0.5, label="suggested")
+    fig.colorbar(sc, ax=ax, label="y")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title(title)
+    ax.legend(loc="best", fontsize=8)
+    return _fig_to_image(fig)
 
 
 class SurrogateModel(ABC):
@@ -209,6 +301,8 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.wd_llm = wd_llm
         self.scale_embeddings = scale_embeddings
         self.train_mll_additionally = train_mll_additionally
+        self._step_stats = {}
+        self._first_log = None  # first per-step log = pre-optimization state
 
         self.to_gpu()
 
@@ -220,12 +314,20 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         # Removed self.finetuned assignment — storing as instance attr caused
         # the tensor to accumulate on GPU across iterations (2C fix).
 
+        if self.training and wandb.run is not None:
+            # train-point embedding stats, picked up by gp_closure for per-step logging
+            lo, hi = torch.aminmax(finetuned.detach())
+            d = torch.pdist(finetuned.detach())  # euclidean, as seen by RBF/Matern
+            self._step_stats = {
+                "embed/train_min": lo.item(),
+                "embed/train_max": hi.item(),
+                "pdists/mean": d.mean().item(),
+                "pdists/median": d.median().item(),
+                "pdists/hist": pdist_hist(d, "train points"),
+            }
+
         mean_x = self.mean_module(finetuned)
         covar_x = self.covar_module(finetuned)
-        
-        if wandb.run is not None:
-            wandb.log({"lr/llm_lr": self.optimizer.param_groups[0]["lr"]})
-            wandb.log({"lr/gp_lr": self.optimizer.param_groups[1]["lr"]})
 
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
@@ -245,6 +347,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         mll = ExactMarginalLogLikelihood(self.likelihood, self)
         mll.train()
         total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Total number of parameters: {total_params}")
         mll.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
         def gp_closure():
@@ -253,6 +356,37 @@ class DeepGP(SurrogateModel, SingleTaskGP):
             mll_loss = -mll(output, self.train_targets.squeeze())
             mll_loss.backward()
             grads = [p.grad for p in self.parameters() if p.requires_grad]
+            if wandb.run is not None:
+                # split llm vs gp: gp hypers are few scalars, would be drowned by llm grads
+                groups = {
+                    "llm": self.finetuning_model.parameters(),
+                    "gp": [*self.covar_module.parameters(), *self.mean_module.parameters(), *self.likelihood.parameters()],
+                }
+                log = {
+                    "train_step": next(_TRAIN_STEP),
+                    **self._step_stats,
+                    "lr/llm_lr": self.optimizer.param_groups[0]["lr"],
+                    "lr/gp_lr": self.optimizer.param_groups[1]["lr"],
+                    "lr/noise": self.likelihood.noise.mean().item(),
+                    "lr/outputscale": getattr(self.covar_module, "outputscale", torch.tensor(1.0)).mean().item(),
+                    # mean over dims so ARD kernels also reduce to one global value
+                    "ls/lengthscale": getattr(self.covar_module, "base_kernel", self.covar_module).lengthscale.mean().item(),
+                }
+                if "pdists/median" in log:
+                    # median heuristic check vs train pairs (what the mll sees): ~1 sane, ->0 overfit, >>1 flat
+                    log["ls/ratio_train"] = log["ls/lengthscale"] / log["pdists/median"]
+                for name, params in groups.items():
+                    g = [p.grad.detach().flatten() for p in params if p.requires_grad and p.grad is not None]
+                    if g:
+                        g = torch.cat(g)
+                        log[f"grads/{name}_max"] = g.max().item()
+                        log[f"grads/{name}_min"] = g.min().item()
+                        log[f"grads/{name}_mean"] = g.mean().item()
+                        log[f"grads/{name}_abs_mean"] = g.abs().mean().item()
+                        log[f"grads/{name}_norm"] = g.norm().item()
+                wandb.log(log)
+                if self._first_log is None:
+                    self._first_log = log
             return mll_loss, grads
 
         self.optimizer = torch.optim.AdamW(
@@ -292,7 +426,18 @@ class DeepGP(SurrogateModel, SingleTaskGP):
                 param.requires_grad = False
             fit_gpytorch_mll(mll)
 
-        
+    @torch.no_grad()
+    def embed(self, x, chunk_size=512):
+        """Embeddings as the kernel sees them (eval mode, post scale_to_bounds), on CPU, row-aligned with x."""
+        self.eval()
+        out = []
+        for start in range(0, x.size(0), chunk_size):
+            e = self.finetuning_model(x[start : start + chunk_size].to(self.train_x.device))
+            if self.scale_embeddings:
+                e = self.scale_to_bounds(e)
+            out.append(e.float().cpu())
+        return torch.cat(out)
+
 
     def predict(
         self, x, observation_noise=True, return_var=True, return_posterior=False
