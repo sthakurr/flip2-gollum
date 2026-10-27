@@ -262,7 +262,7 @@ def train(config):
                     "pdists/mean", "pdists/median", "pdists/hist", "ls/lengthscale", "ls/ratio_train"]:
             run.define_metric(key, step_metric="train_step")
         for key in ["top5pct_coverage", "train/*", "top_*", "quantile_*", "evaluated_suggestions",
-                    "distances/*", "embed_all/*", "pdists_all/*", "ls_all/*", "tsne/*", "kernel/*",
+                    "distances/*", "embed_all/*", "pdists_all/*", "ls_all/*", "tsne/*", "kernel/*", "post/*",
                     "pdists/mean_by_epoch", "pdists/median_by_epoch", "ls/lengthscale_by_epoch", "ls/ratio_train_by_epoch", "ls/ratio_test_by_epoch", "ls/ratio_by_max_pdist"]:
             run.define_metric(key, step_metric="epoch")
 
@@ -327,6 +327,25 @@ def train(config):
                     "ls/lengthscale_by_epoch": ls,
                     "ls/ratio_train_by_epoch": ls / d_train.median().item(),
                     "ls/ratio_test_by_epoch": ls / d_test.median().item(),
+                    "epoch": i,
+                })
+
+                # candidate posterior as analytic EI sees it (latent f, no observation noise), in y units
+                with torch.no_grad():
+                    posts = [bo.surrogate_model.posterior(c.to("cuda")) for c in dm.heldout_x.split(512)]
+                mu = torch.cat([p.mean.squeeze(-1) for p in posts]).cpu()
+                sd = torch.cat([p.variance.squeeze(-1) for p in posts]).clamp_min(0).sqrt().cpu()
+                prior_sd = (getattr(bo.surrogate_model.covar_module, "outputscale", torch.tensor(1.0)).sqrt().item()
+                            * dm.train_y.std().item())  # Standardize: prior var in y units = outputscale * var(train y)
+                z = (mu[indices[0]] - dm.train_y.max()) / sd[indices[0]]  # EI's z at the chosen candidate
+                wandb.log({
+                    "post/std_median": sd.median().item(),
+                    "post/std_min": sd.min().item(),
+                    "post/std_max": sd.max().item(),
+                    "post/std_rel_median": sd.median().item() / prior_sd,
+                    "post/mean_std": mu.std().item(),
+                    "post/mean_y_spearman": spearman(mu, dm.heldout_y.squeeze(-1)),
+                    "post/ei_z_chosen": z.item(),
                     "epoch": i,
                 })
 
