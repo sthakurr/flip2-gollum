@@ -7,6 +7,7 @@ from botorch.models.transforms.outcome import Standardize
 from gpytorch import ExactMarginalLogLikelihood
 from gpytorch.constraints.constraints import GreaterThan
 from gpytorch.likelihoods.gaussian_likelihood import GaussianLikelihood
+from gpytorch.priors import GammaPrior
 from torch.optim.lr_scheduler import StepLR
 
 from botorch.optim.fit import fit_gpytorch_mll_torch
@@ -24,6 +25,7 @@ import torch
 import gpytorch
 import io
 import itertools
+import math
 import os
 import PIL.Image
 
@@ -292,6 +294,9 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         scale_embeddings: bool = False,
         embedding_norm: str = "global",
         embedding_norm_bounds: tuple = (-1.0, 1.0),
+        dimension_aware_prior: bool = False,
+        dimension_aware_prefactor: float = 0.4,
+        dimension_aware_offset: float = 4.0,
         train_mll_additionally: bool = False,
         median_heuristic_init: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
@@ -364,8 +369,51 @@ class DeepGP(SurrogateModel, SingleTaskGP):
 
         self.to_gpu()
 
+        if dimension_aware_prior:
+            self.apply_dimension_aware_prior(dimension_aware_prefactor, dimension_aware_offset)
         if median_heuristic_init:
             self.init_lengthscale_from_median()
+
+    @torch.no_grad()
+    def apply_dimension_aware_prior(self, prefactor=0.4, offset=4.0):
+        """Gamma hyperpriors on lengthscale and outputscale, scaled by the embedding dimension.
+
+        Form taken from Chen, Fleck & Stuyver's chemical-BO kernel factory:
+
+            l_mean = prefactor * sqrt(D) + offset
+            lengthscale ~ Gamma(2 * l_mean, 2.0)    # mean l_mean
+            outputscale ~ Gamma(l_mean, 1.0)        # mean l_mean
+
+        both initialized at l_mean. D is the width of what the kernel actually sees: the projector
+        output when projection_dim is set, otherwise the featurizer's input_dim. Their D is instead
+        the number of computational-representation columns of the search space, post-PCA, for a
+        fixed featurization, and their prefactor and offset were fitted for that pipeline. Treat the
+        defaults as a starting point rather than a transferable law.
+
+        A prior only bites if the loss sees it: ExactMarginalLogLikelihood adds the log-prob of every
+        registered prior, and DeepGP.fit builds its closure from that same mll, so it does.
+        """
+        projection_dim = getattr(self.finetuning_model, "projection_dim", 64)
+        D = projection_dim or getattr(self.finetuning_model, "input_dim", 768)
+        if not D:
+            print("dimension-aware prior skipped: no embedding dimension on the finetuning model")
+            return
+        l_mean = prefactor * math.sqrt(D) + offset
+
+        base_kernel = getattr(self.covar_module, "base_kernel", self.covar_module)
+        if getattr(base_kernel, "has_lengthscale", False):
+            base_kernel.register_prior(
+                "lengthscale_prior", GammaPrior(2.0 * l_mean, 2.0),
+                lambda m: m.lengthscale, lambda m, v: m._set_lengthscale(v),
+            )
+            base_kernel.initialize(lengthscale=l_mean)
+        if hasattr(self.covar_module, "outputscale"):
+            self.covar_module.register_prior(
+                "outputscale_prior", GammaPrior(1.0 * l_mean, 1.0),
+                lambda m: m.outputscale, lambda m, v: m._set_outputscale(v),
+            )
+            self.covar_module.initialize(outputscale=l_mean)
+        print(f"dimension-aware prior: D={D}, l_mean={l_mean:.4g}")
 
     @torch.no_grad()
     def init_lengthscale_from_median(self):
