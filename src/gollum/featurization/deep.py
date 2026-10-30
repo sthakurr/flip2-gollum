@@ -141,9 +141,8 @@ class LLMFeaturizer(BaseNNFeaturizer):
     def get_embeddings(self, x, batch_size=4):
         torch.cuda.empty_cache()
 
-        # dtype cast done once here, not inside the loop (2B fix)
-        llm_dtype = getattr(self, "_llm_dtype", torch.float32)
-        x = x.to(dtype=llm_dtype)
+        # No cast to the LLM dtype here: x holds token ids, and bfloat16 (8-bit mantissa) rounds
+        # ids > 256 to neighbouring ids before .long() below. float64 holds them exactly.
 
         n_points = x.size(0)
         ids_split = int(x.shape[-1] / 2)

@@ -85,6 +85,24 @@ in yield units (outcome transform undone). Computed via `model.posterior` in chu
 `ei_z_chosen` replaces the planned "explore fraction" σφ(z) / EI: that ratio exceeds 1 whenever μ < f\*
 (the mean term (μ − f\*)Φ(z) is negative), so it is not a fraction. z carries the same information.
 
+### Candidate calibration (`cand/`)
+
+Same candidate posterior as `post/`, but **with observation noise** and scored against the true held-out
+yields, via `calculate_model_fit_metrics`. Built as a *diagonal* MultivariateNormal: the pool is embedded
+in chunks so only marginals exist, and per-point predictive density is the quantity that answers
+"is sigma honest" — a joint NLPD would fold in the correlation structure too.
+
+| key | definition | read as |
+|---|---|---|
+| `cand/mse`, `cand/mae`, `cand/r2` | point-prediction error of μ over candidates | depends on μ only; blind to σ |
+| `cand/nlpd` | mean per-point negative log predictive density | the σ-sensitive one. Same μ with σ 8× too small moved it 3.5 → 33.6 in a synthetic check |
+| `cand/msll` | the same, minus the loss of a trivial predict-the-training-mean model | < 0 beats that baseline; ≈ 0 means the model adds nothing; ≫ 0 is actively worse than guessing the mean |
+| `cand/qce` | \|fraction of y inside the 95% interval − 0.95\| | 0 = honest intervals. Grows toward 0.95 as σ collapses; a *too-wide* σ saturates near 0.05 |
+
+`r2` and `nlpd` here are the quantities the gollum supplementary table reports per benchmark, so these
+curves are directly comparable to it. Note `r2` can stay flat while `nlpd` blows up — that split is the
+whole point of logging both.
+
 ### Other
 
 | key | definition |

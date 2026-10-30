@@ -75,6 +75,26 @@ def kernel_blocks(base_kernel, train_emb, test_emb):
     }
 
 
+def select_hypers(module, hypers):
+    """Keep the hypers this module actually has.
+
+    gpytorch registers constrained hypers under a `raw_` name, so `named_parameters()`
+    reports `...raw_lengthscale` while `initialize()` takes `...lengthscale`. Matching the
+    plain name against the parameter names silently drops every entry.
+    """
+    names = {name for name, _ in module.named_parameters()}
+
+    def raw(key):
+        prefix, _, attr = key.rpartition(".")
+        return f"{prefix}.raw_{attr}" if prefix else f"raw_{attr}"
+
+    return {
+        k: torch.as_tensor(v)
+        for k, v in hypers.items()
+        if v is not None and (k in names or raw(k) in names)
+    }
+
+
 def spearman(a, b):
     """Rank correlation of two 1D tensors (ties broken arbitrarily)."""
     ra, rb = (x.argsort().argsort().double() for x in (a, b))
@@ -174,12 +194,7 @@ class GP(SurrogateModel, SingleTaskGP):
             "covar_module.outputscale": torch.tensor(initial_outputscale_val),
         }
 
-        existing_parameters = {name for name, _ in self.named_parameters()}
-        hypers_to_use = {
-            k: torch.tensor(v)
-            for k, v in hypers.items()
-            if k in existing_parameters and v is not None
-        }
+        hypers_to_use = select_hypers(self, hypers)
 
         self.initialize(**hypers_to_use)
         self.gp_lr = gp_lr
@@ -238,6 +253,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         wd_llm: float = 1e-3,
         scale_embeddings: bool = False,
         train_mll_additionally: bool = False,
+        median_heuristic_init: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
     ) -> None:
 
@@ -283,12 +299,7 @@ class DeepGP(SurrogateModel, SingleTaskGP):
             "covar_module.outputscale": torch.tensor(initial_outputscale_val),
         }
 
-        existing_parameters = {name for name, _ in self.named_parameters()}
-        hypers_to_use = {
-            k: torch.tensor(v)
-            for k, v in hypers.items()
-            if k in existing_parameters and v is not None
-        }
+        hypers_to_use = select_hypers(self, hypers)
         self.initialize(**hypers_to_use)
         self.train_x = self.train_x.to(**tkwargs)
         self.train_y = self.train_y.to(**tkwargs)
@@ -305,6 +316,39 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self._first_log = None  # first per-step log = pre-optimization state
 
         self.to_gpu()
+
+        if median_heuristic_init:
+            self.init_lengthscale_from_median()
+
+    @torch.no_grad()
+    def init_lengthscale_from_median(self):
+        """Median heuristic: set the lengthscale to the median pairwise distance of the train embeddings.
+
+        A fixed initial lengthscale is not comparable across datasets — the embedding point cloud is
+        several times tighter on some than on others, so the same value starts the kernel in a different
+        regime each time. Anchoring it to the data puts every dataset at lengthscale / distance = 1
+        before the first optimizer step. Re-run on every DeepGP construction, i.e. once per BO iteration,
+        which is also when the previously fitted lengthscale is discarded anyway.
+        """
+        if self.train_x.shape[0] < 2:
+            return
+
+        was_training = self.finetuning_model.training
+        self.finetuning_model.eval()  # no LoRA dropout: this estimate should not be noisy
+        self.scale_to_bounds.train()  # fills the min/max buffers, as the first fit forward would
+        embeddings = self.finetuning_model(self.train_x)
+        if self.scale_embeddings:
+            embeddings = self.scale_to_bounds(embeddings)
+        d = torch.pdist(embeddings).median()
+        self.finetuning_model.train(was_training)
+
+        if not torch.isfinite(d) or d <= 0:
+            print(f"median-heuristic init skipped: median pairwise distance = {d}")
+            return
+
+        base_kernel = getattr(self.covar_module, "base_kernel", self.covar_module)
+        base_kernel.initialize(lengthscale=d)
+        print(f"median-heuristic lengthscale init: {d.item():.4g}")
 
     def forward(self, x):
         finetuned = self.finetuning_model(x)

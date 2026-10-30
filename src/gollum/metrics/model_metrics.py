@@ -23,7 +23,7 @@ def log_model_parameters(model, epoch=0):
         wandb.log({transformed_name: value, "epoch": epoch})
 
 
-def calculate_model_fit_metrics(posterior, y, stage="train"):
+def calculate_model_fit_metrics(posterior, y, stage="train", train_y=None):
     preds, variances = posterior.mean, posterior.variance
 
     preds = posterior.mean.squeeze()
@@ -33,7 +33,9 @@ def calculate_model_fit_metrics(posterior, y, stage="train"):
     mae = torch.mean(torch.abs(preds - y))
     r2 = 1 - (torch.sum((y - preds) ** 2) / torch.sum((y - torch.mean(y)) ** 2))
     nlpd = negative_log_predictive_density(posterior, y)
-    msll = mean_standardized_log_loss(posterior, y)
+    # without train_y this returns the plain mean log loss, i.e. a duplicate of nlpd;
+    # passing it subtracts the trivial predict-the-training-mean model, so msll < 0 beats that baseline
+    msll = mean_standardized_log_loss(posterior, y, train_y.squeeze() if train_y is not None else None)
     qce = quantile_coverage_error(posterior, y)
 
     metrics = {

@@ -41,9 +41,13 @@ from gollum.bo.optimizer import BotorchOptimizer
 
 from gollum.metrics import (
     calculate_data_stats,
+    calculate_model_fit_metrics,
     log_bo_metrics,
     log_data_stats,
+    log_model_fit_metrics,
 )
+from gpytorch.distributions import MultivariateNormal
+from linear_operator.operators import DiagLinearOperator
 
 try:
     from gollum.metrics.analysis import calculate_distances, compute_thresholds
@@ -262,7 +266,7 @@ def train(config):
                     "pdists/mean", "pdists/median", "pdists/hist", "ls/lengthscale", "ls/ratio_train"]:
             run.define_metric(key, step_metric="train_step")
         for key in ["top5pct_coverage", "train/*", "top_*", "quantile_*", "evaluated_suggestions",
-                    "distances/*", "embed_all/*", "pdists_all/*", "ls_all/*", "tsne/*", "kernel/*", "post/*",
+                    "distances/*", "embed_all/*", "pdists_all/*", "ls_all/*", "tsne/*", "kernel/*", "post/*", "cand/*",
                     "pdists/mean_by_epoch", "pdists/median_by_epoch", "ls/lengthscale_by_epoch", "ls/ratio_train_by_epoch", "ls/ratio_test_by_epoch", "ls/ratio_by_max_pdist"]:
             run.define_metric(key, step_metric="epoch")
 
@@ -348,6 +352,22 @@ def train(config):
                     "post/ei_z_chosen": z.item(),
                     "epoch": i,
                 })
+
+                # calibration of the candidate posterior against the true held-out yields.
+                # Observation noise included: these are compared to measured y, not to latent f.
+                # Standardize keeps the likelihood noise in standardized units, so scale it back.
+                oc = getattr(bo.surrogate_model, "outcome_transform", None)
+                stdv = oc.stdvs.squeeze().item() if oc is not None else 1.0
+                noise_y = bo.surrogate_model.likelihood.noise.mean().item() * stdv ** 2
+                # diagonal: the pool is embedded in chunks, so only marginals exist. Per-point
+                # predictive density is also the quantity that answers "is sigma honest" —
+                # a joint NLPD would fold in the correlation structure as well.
+                cand_dist = MultivariateNormal(mu, DiagLinearOperator(sd ** 2 + noise_y))
+                log_model_fit_metrics(
+                    calculate_model_fit_metrics(cand_dist, dm.heldout_y.cpu(), stage="cand",
+                                                train_y=dm.train_y.cpu()),
+                    epoch=i,
+                )
 
                 # warm-start from previous map (rescaled to tiny std, as tsne expects) so maps stay comparable across iters
                 init = "pca" if prev_tsne is None else prev_tsne / prev_tsne[:, 0].std() * 1e-4
