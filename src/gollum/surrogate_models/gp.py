@@ -95,6 +95,44 @@ def select_hypers(module, hypers):
     }
 
 
+class ScalePerDimToBounds(torch.nn.Module):
+    """Min-max scale each embedding dimension separately, where ScaleToBounds scales globally.
+
+    gpytorch's ScaleToBounds divides the whole tensor by one scalar taken from its global min and
+    max, so a few wide dimensions set the scale and the rest barely move the Euclidean distance the
+    kernel sees. Scaling per dimension gives every dimension equal weight, which raises the typical
+    pairwise distance and lowers lengthscale / distance.
+
+    Mirrors the "local" branch of Chen/Fleck/Stuyver's chemical-BO code, which min-max normalizes
+    each representation column. Two deliberate differences: theirs normalizes over the whole library
+    in one pass, while this follows ScaleToBounds and fits on the training points, reusing those
+    bounds at eval; and the bounds default to the (-1, 1) already used by the global scaler so that
+    an A/B against it differs only in the axis. Theirs targets [0, 1], which halves every distance
+    and so doubles the starting lengthscale / distance unless the lengthscale is data-anchored.
+
+    Unlike ScaleToBounds this does not clamp at eval: a candidate outside the training range stays
+    outside instead of being folded onto the boundary.
+    """
+
+    def __init__(self, lower_bound=-1.0, upper_bound=1.0, eps=1e-6):
+        super().__init__()
+        self.lower_bound = float(lower_bound)
+        self.upper_bound = float(upper_bound)
+        self.eps = eps
+        self.register_buffer("min_val", torch.zeros(1))
+        self.register_buffer("max_val", torch.ones(1))
+
+    def forward(self, x):
+        if self.training:
+            # botorch hands acquisition a 3-D batch, so reduce over every leading dim, not just 0
+            flat = x.reshape(-1, x.shape[-1])
+            self.min_val.data = flat.min(dim=0).values
+            self.max_val.data = flat.max(dim=0).values
+        # a dimension that is constant across the training points would divide by zero
+        span = (self.max_val - self.min_val).clamp_min(self.eps)
+        return (x - self.min_val) * (0.95 * (self.upper_bound - self.lower_bound) / span) + 0.95 * self.lower_bound
+
+
 def spearman(a, b):
     """Rank correlation of two 1D tensors (ties broken arbitrarily)."""
     ra, rb = (x.argsort().argsort().double() for x in (a, b))
@@ -252,6 +290,8 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         wd: float = 1e-3,
         wd_llm: float = 1e-3,
         scale_embeddings: bool = False,
+        embedding_norm: str = "global",
+        embedding_norm_bounds: tuple = (-1.0, 1.0),
         train_mll_additionally: bool = False,
         median_heuristic_init: bool = False,
         finetuning_model: Union[None, BaseNNFeaturizer] = None,
@@ -303,7 +343,14 @@ class DeepGP(SurrogateModel, SingleTaskGP):
         self.initialize(**hypers_to_use)
         self.train_x = self.train_x.to(**tkwargs)
         self.train_y = self.train_y.to(**tkwargs)
-        self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(-1.0, 1.0)
+        lo, hi = embedding_norm_bounds
+        if embedding_norm == "global":
+            self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(lo, hi)
+        elif embedding_norm == "per_dim":
+            self.scale_to_bounds = ScalePerDimToBounds(lo, hi)
+        else:
+            raise ValueError(f"embedding_norm must be 'global' or 'per_dim', got {embedding_norm!r}")
+        self.embedding_norm = embedding_norm
 
         self.ft_lr = ft_lr
         self.gp_lr = gp_lr
